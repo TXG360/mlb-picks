@@ -73,21 +73,19 @@ def get_pitcher_stats_mlb(player_id):
             bb   = int(s.get('baseOnBalls', 0))
             bf   = int(s.get('battersFaced', 1))
             hr   = int(s.get('homeRuns', 0))
-            fly  = int(s.get('flyOuts', 0))
 
-            k_pct     = round((k / bf) * 100, 1) if bf else 0
-            bb_pct    = round((bb / bf) * 100, 1) if bf else 0
-            total_fly = hr + fly
-            hrfb      = round((hr / total_fly) * 100, 1) if total_fly else 0
+            k_pct  = round((k / bf) * 100, 1) if bf else 0
+            bb_pct = round((bb / bf) * 100, 1) if bf else 0
+            hr9    = round((hr / ip) * 9, 2) if ip else 0
 
             return {
-                'ERA':   round(era, 2),
-                'WHIP':  round(whip, 2),
-                'K%':    f"{k_pct}%",
-                'BB%':   f"{bb_pct}%",
-                'HR/FB': f"{hrfb}%",
-                'IP':    round(ip, 1),
-                'GS':    gs,
+                'ERA':  round(era, 2),
+                'WHIP': round(whip, 2),
+                'K%':   f"{k_pct}%",
+                'BB%':  f"{bb_pct}%",
+                'HR/9': hr9,
+                'IP':   round(ip, 1),
+                'GS':   gs,
             }
         except Exception as e:
             print(f"MLB stats error for player {player_id}: {e}")
@@ -101,11 +99,11 @@ def stat_color(stat, value):
     except:
         return ''
     rules = {
-        'ERA':   ([(3.0,'elite'),(3.75,'good'),(4.5,'avg')], False),
-        'WHIP':  ([(1.1,'elite'),(1.25,'good'),(1.4,'avg')], False),
-        'K%':    ([(28,'elite'),(23,'good'),(18,'avg')],     True),
-        'BB%':   ([(5,'elite'),(7,'good'),(9,'avg')],        False),
-        'HR/FB': ([(8,'elite'),(11,'good'),(14,'avg')],      False),
+        'ERA':  ([(3.0,'elite'),(3.75,'good'),(4.5,'avg')], False),
+        'WHIP': ([(1.1,'elite'),(1.25,'good'),(1.4,'avg')], False),
+        'K%':   ([(28,'elite'),(23,'good'),(18,'avg')],     True),
+        'BB%':  ([(5,'elite'),(7,'good'),(9,'avg')],        False),
+        'HR/9': ([(0.8,'elite'),(1.1,'good'),(1.4,'avg')],  False),
     }
     if stat not in rules:
         return ''
@@ -220,7 +218,7 @@ def render_pitcher_block(name, stats):
                 f'<p class="pname">⚾ {name}</p>'
                 f'<p style="color:#888;font-size:0.8em">Stats unavailable</p>'
                 f'</div>')
-    keys = ['ERA', 'WHIP', 'K%', 'BB%', 'HR/FB']
+    keys = ['ERA', 'WHIP', 'K%', 'BB%', 'HR/9']
     grid = ''.join(
         f'<div class="sc"><span class="sl">{k}</span>'
         f'<span class="sv {stat_color(k, stats.get(k,"N/A"))}">{stats.get(k,"N/A")}</span></div>'
