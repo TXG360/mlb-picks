@@ -65,31 +65,29 @@ def get_pitcher_stats_mlb(player_id):
                 return None
             s = splits[0]['stat']
 
-            ip  = float(s.get('inningsPitched', 0))
-            gs  = int(s.get('gamesStarted', 0))
-            era = float(s.get('era', 0))
+            ip   = float(s.get('inningsPitched', 0))
+            gs   = int(s.get('gamesStarted', 0))
+            era  = float(s.get('era', 0))
             whip = float(s.get('whip', 0))
-            k   = int(s.get('strikeOuts', 0))
-            bb  = int(s.get('baseOnBalls', 0))
-            bf  = int(s.get('battersFaced', 1))
-            hr  = int(s.get('homeRuns', 0))
-            fly = int(s.get('flyOuts', 1))
+            k    = int(s.get('strikeOuts', 0))
+            bb   = int(s.get('baseOnBalls', 0))
+            bf   = int(s.get('battersFaced', 1))
+            hr   = int(s.get('homeRuns', 0))
+            fly  = int(s.get('flyOuts', 0))
 
-            k_pct  = round((k / bf) * 100, 1) if bf else 0
-            bb_pct = round((bb / bf) * 100, 1) if bf else 0
-            hrfb   = round((hr / fly) * 100, 1) if fly else 0
+            k_pct      = round((k / bf) * 100, 1) if bf else 0
+            bb_pct     = round((bb / bf) * 100, 1) if bf else 0
+            total_fly  = hr + fly
+            hrfb       = round((hr / total_fly) * 100, 1) if total_fly else 0
 
             return {
-                'ERA':    round(era, 2),
-                'WHIP':   round(whip, 2),
-                'xFIP':   'N/A',
-                'SIERA':  'N/A',
-                'K%':     f"{k_pct}%",
-                'BB%':    f"{bb_pct}%",
-                'SwStr%': 'N/A',
-                'HR/FB':  f"{hrfb}%",
-                'IP':     round(ip, 1),
-                'GS':     gs,
+                'ERA':   round(era, 2),
+                'WHIP':  round(whip, 2),
+                'K%':    f"{k_pct}%",
+                'BB%':   f"{bb_pct}%",
+                'HR/FB': f"{hrfb}%",
+                'IP':    round(ip, 1),
+                'GS':    gs,
             }
         except Exception as e:
             print(f"MLB stats error for player {player_id}: {e}")
@@ -147,7 +145,7 @@ def get_todays_games():
     today = datetime.now(pacific).strftime('%Y-%m-%d')
     url = (f"https://statsapi.mlb.com/api/v1/schedule"
            f"?sportId=1&date={today}"
-           f"&hydrate=probablePitcher,lineups,team,venue,game")
+           f"&hydrate=probablePitcher,lineups,team,venue,game,linescore")
     data = requests.get(url).json()
 
     games = []
@@ -156,6 +154,24 @@ def get_todays_games():
             away_team = game['teams']['away']['team']['name']
             home_team = game['teams']['home']['team']['name']
 
+            # Game status
+            status        = game.get('status', {})
+            abstract_state = status.get('abstractGameState', '')  # Preview, Live, Final
+            detailed_state = status.get('detailedState', '')       # Scheduled, In Progress, Final, etc.
+
+            # Scores
+            away_score = game['teams']['away'].get('score', None)
+            home_score = game['teams']['home'].get('score', None)
+
+            # Inning info for live games
+            inning_info = ''
+            if abstract_state == 'Live':
+                ls = game.get('linescore', {})
+                inning     = ls.get('currentInningOrdinal', '')
+                half       = ls.get('inningHalf', '')
+                inning_info = f"{half} {inning}"
+
+            # Game time PT
             game_time_pt = ''
             raw = game.get('gameDate', '')
             if raw:
@@ -184,6 +200,11 @@ def get_todays_games():
                 'away_team':        away_team,
                 'home_team':        home_team,
                 'game_time':        game_time_pt,
+                'abstract_state':   abstract_state,
+                'detailed_state':   detailed_state,
+                'away_score':       away_score,
+                'home_score':       home_score,
+                'inning_info':      inning_info,
                 'away_pitcher':     away_p,
                 'home_pitcher':     home_p,
                 'away_p_stats':     get_pitcher_stats_mlb(away_p_id),
@@ -214,8 +235,41 @@ def render_pitcher_block(name, stats):
             f'<span style="color:#888;font-size:0.75em">({stats["GS"]} GS · {stats["IP"]} IP)</span></p>'
             f'<div class="sgrid">{grid}</div></div>')
 
-def render_card(g, css):
-    pf = g['park_factor']
+def render_score_banner(g):
+    state = g['abstract_state']
+    away  = g['away_team']
+    home  = g['home_team']
+    as_   = g['away_score']
+    hs    = g['home_score']
+
+    if state == 'Final':
+        winner = away if as_ > hs else home
+        return (f'<div class="score-banner final">'
+                f'<span class="score-teams">{away} <span class="score-num">{as_}</span> '
+                f'— <span class="score-num">{hs}</span> {home}</span>'
+                f'<span class="score-label">FINAL · {winner} Win</span>'
+                f'</div>')
+    elif state == 'Live':
+        return (f'<div class="score-banner live">'
+                f'<span class="score-teams">{away} <span class="score-num">{as_}</span> '
+                f'— <span class="score-num">{hs}</span> {home}</span>'
+                f'<span class="score-label">🔴 LIVE · {g["inning_info"]}</span>'
+                f'</div>')
+    return ''
+
+def render_card(g):
+    state = g['abstract_state']
+    pf    = g['park_factor']
+
+    if state == 'Final':
+        border_cls = 'final-game'
+    elif state == 'Live':
+        border_cls = 'live-game'
+    elif g['lineup_confirmed']:
+        border_cls = 'confirmed'
+    else:
+        border_cls = 'pending'
+
     pf_label = ('🔴 Hitter Friendly' if pf >= 105 else
                 '🟢 Pitcher Friendly' if pf <= 95 else '⚪ Neutral')
     pf_cls   = ('hitter' if pf >= 105 else
@@ -230,8 +284,19 @@ def render_card(g, css):
             weather_html = (f'<span class="badge wx">'
                             f'🌤️ {w["label"]} · {w["temp"]} · 💨 {w["wind"]}</span>')
 
+    score_html = render_score_banner(g)
+
+    # For final/live games, skip pitcher stats block to save space
+    pitchers_html = ''
+    if state not in ('Final',):
+        pitchers_html = f'''
+        <div class="pr">
+          {render_pitcher_block(g["away_pitcher"], g["away_p_stats"])}
+          {render_pitcher_block(g["home_pitcher"], g["home_p_stats"])}
+        </div>'''
+
     lineups_html = ''
-    if g['lineup_confirmed']:
+    if g['lineup_confirmed'] and state != 'Final':
         away_li = ''.join(f'<li>{p}</li>' for p in g['away_lineup'])
         home_li = ''.join(f'<li>{p}</li>' for p in g['home_lineup'])
         lineups_html = (f'<details class="lu"><summary>📋 View Lineups</summary>'
@@ -239,23 +304,29 @@ def render_card(g, css):
                         f'<div><b>{g["away_team"]}</b><ol>{away_li}</ol></div>'
                         f'<div><b>{g["home_team"]}</b><ol>{home_li}</ol></div>'
                         f'</div></details>')
-    else:
+    elif state != 'Final' and not g['lineup_confirmed']:
         lineups_html = '<p style="color:#ff6b6b;font-size:0.82em">⏳ Lineup not yet confirmed</p>'
 
+    header_right = ''
+    if state == 'Final':
+        header_right = '<span class="gt" style="color:#888">FINAL</span>'
+    elif state == 'Live':
+        header_right = f'<span class="gt" style="color:#ff4444">🔴 LIVE · {g["inning_info"]}</span>'
+    else:
+        header_right = f'<span class="gt">🕐 {g["game_time"]}</span>'
+
     return f'''
-    <div class="game {css}">
+    <div class="game {border_cls}">
       <div class="gh">
         <h3>{g["away_team"]} @ {g["home_team"]}</h3>
-        <span class="gt">🕐 {g["game_time"]}</span>
+        {header_right}
       </div>
+      {score_html}
       <div class="badges">
         <span class="badge {pf_cls}">🏠 PF {pf} · {pf_label}</span>
         {weather_html}
       </div>
-      <div class="pr">
-        {render_pitcher_block(g["away_pitcher"], g["away_p_stats"])}
-        {render_pitcher_block(g["home_pitcher"], g["home_p_stats"])}
-      </div>
+      {pitchers_html}
       {lineups_html}
     </div>'''
 
@@ -265,21 +336,33 @@ def index():
     pacific = pytz.timezone('America/Los_Angeles')
     now_pt  = datetime.now(pacific)
     games   = get_todays_games()
-    confirmed = [g for g in games if g['lineup_confirmed']]
-    pending   = [g for g in games if not g['lineup_confirmed']]
+
+    live      = [g for g in games if g['abstract_state'] == 'Live']
+    confirmed = [g for g in games if g['abstract_state'] == 'Preview' and g['lineup_confirmed']]
+    pending   = [g for g in games if g['abstract_state'] == 'Preview' and not g['lineup_confirmed']]
+    final     = [g for g in games if g['abstract_state'] == 'Final']
 
     css = """
     *{box-sizing:border-box;margin:0;padding:0}
     body{font-family:Arial,sans-serif;background:#1a1a2e;color:#eee;padding:16px;max-width:1100px;margin:auto}
     h1{color:#ffd700;font-size:1.5em;margin-bottom:4px}
     h2{font-size:1.1em;margin:16px 0 8px}
-    h3{color:#ff6b6b;font-size:1em}
+    h3{color:#eee;font-size:1em}
     .sub{color:#888;font-size:0.82em;margin-bottom:16px}
     .game{background:#16213e;border:1px solid #0f3460;padding:14px;margin:10px 0;border-radius:10px}
     .confirmed{border-left:4px solid #00ff88}
     .pending{border-left:4px solid #ff6b6b}
+    .live-game{border-left:4px solid #ff4444;background:#1e1020}
+    .final-game{border-left:4px solid #444;opacity:0.75}
     .gh{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
     .gt{color:#aaa;font-size:0.82em}
+    .score-banner{display:flex;justify-content:space-between;align-items:center;
+                  padding:8px 12px;border-radius:6px;margin-bottom:10px;font-size:0.9em}
+    .score-banner.final{background:#1a1a1a;color:#aaa}
+    .score-banner.live{background:#2a0a0a;color:#ff8888}
+    .score-num{font-size:1.3em;font-weight:bold;color:#ffd700}
+    .score-label{font-size:0.78em;color:#888}
+    .score-banner.live .score-label{color:#ff6666}
     .badges{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
     .badge{font-size:0.73em;padding:3px 8px;border-radius:12px}
     .hitter{background:#3d1515;color:#ff6b6b}
@@ -302,6 +385,12 @@ def index():
     .lu-row li{margin:2px 0}
     """
 
+    def section(title, color, items):
+        if not items:
+            return ''
+        return (f'<h2 style="color:{color}">{title} ({len(items)} games)</h2>'
+                + ''.join(render_card(g) for g in items))
+
     html = f"""<!DOCTYPE html><html>
     <head>
       <title>MLB V2 – {now_pt.strftime('%b %d, %Y')}</title>
@@ -311,10 +400,10 @@ def index():
     <body>
       <h1>⚾ MLB V2 Picks Dashboard</h1>
       <p class="sub">Last updated: {now_pt.strftime('%I:%M %p PT')} · {now_pt.strftime('%b %d, %Y')}</p>
-      <h2 style="color:#00ff88">✅ Lineups Confirmed ({len(confirmed)} games)</h2>
-      {''.join(render_card(g,'confirmed') for g in confirmed)}
-      <h2 style="color:#ff6b6b">⏳ Lineups Pending ({len(pending)} games)</h2>
-      {''.join(render_card(g,'pending') for g in pending)}
+      {section('🔴 Live Now', '#ff4444', live)}
+      {section('✅ Lineups Confirmed', '#00ff88', confirmed)}
+      {section('⏳ Lineups Pending', '#ff6b6b', pending)}
+      {section('☑️ Completed', '#555', final)}
     </body></html>"""
     return html
 
