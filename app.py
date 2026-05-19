@@ -1,11 +1,13 @@
 from flask import Flask, jsonify
 import requests
 from datetime import datetime
+import pytz
 
 app = Flask(__name__)
 
 def get_todays_games():
-    today = datetime.now().strftime('%Y-%m-%d')
+    pacific = pytz.timezone("America/Los_Angeles")
+    today = datetime.now(pacific).strftime('%Y-%m-%d')
     url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={today}&hydrate=probablePitcher,lineups,team"
     response = requests.get(url)
     data = response.json()
@@ -44,6 +46,8 @@ def get_todays_games():
 
 @app.route('/')
 def index():
+    pacific = pytz.timezone("America/Los_Angeles")
+    now_pacific = datetime.now(pacific)
     games = get_todays_games()
     confirmed = [g for g in games if g['lineup_confirmed']]
     pending = [g for g in games if not g['lineup_confirmed']]
@@ -51,7 +55,7 @@ def index():
     html = f"""
     <html>
     <head>
-        <title>MLB Picks - {datetime.now().strftime('%B %d, %Y')}</title>
+        <title>MLB Picks - {now_pacific.strftime('%B %d, %Y')}</title>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
             body {{ font-family: Arial, sans-serif; background: #1a1a2e; color: #eee; padding: 20px; }}
@@ -67,7 +71,7 @@ def index():
     </head>
     <body>
         <h1>⚾ MLB Daily Picks Dashboard</h1>
-        <p>Last updated: {datetime.now().strftime('%I:%M %p')}</p>
+        <p>Last updated: {now_pacific.strftime('%I:%M %p')} PT</p>
         
         <h2>✅ Lineups Confirmed ({len(confirmed)} games)</h2>
     """
