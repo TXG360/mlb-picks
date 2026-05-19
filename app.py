@@ -75,10 +75,10 @@ def get_pitcher_stats_mlb(player_id):
             hr   = int(s.get('homeRuns', 0))
             fly  = int(s.get('flyOuts', 0))
 
-            k_pct      = round((k / bf) * 100, 1) if bf else 0
-            bb_pct     = round((bb / bf) * 100, 1) if bf else 0
-            total_fly  = hr + fly
-            hrfb       = round((hr / total_fly) * 100, 1) if total_fly else 0
+            k_pct     = round((k / bf) * 100, 1) if bf else 0
+            bb_pct    = round((bb / bf) * 100, 1) if bf else 0
+            total_fly = hr + fly
+            hrfb      = round((hr / total_fly) * 100, 1) if total_fly else 0
 
             return {
                 'ERA':   round(era, 2),
@@ -154,24 +154,20 @@ def get_todays_games():
             away_team = game['teams']['away']['team']['name']
             home_team = game['teams']['home']['team']['name']
 
-            # Game status
-            status        = game.get('status', {})
-            abstract_state = status.get('abstractGameState', '')  # Preview, Live, Final
-            detailed_state = status.get('detailedState', '')       # Scheduled, In Progress, Final, etc.
+            status         = game.get('status', {})
+            abstract_state = status.get('abstractGameState', '')
+            detailed_state = status.get('detailedState', '')
 
-            # Scores
             away_score = game['teams']['away'].get('score', None)
             home_score = game['teams']['home'].get('score', None)
 
-            # Inning info for live games
             inning_info = ''
             if abstract_state == 'Live':
-                ls = game.get('linescore', {})
-                inning     = ls.get('currentInningOrdinal', '')
-                half       = ls.get('inningHalf', '')
+                ls          = game.get('linescore', {})
+                inning      = ls.get('currentInningOrdinal', '')
+                half        = ls.get('inningHalf', '')
                 inning_info = f"{half} {inning}"
 
-            # Game time PT
             game_time_pt = ''
             raw = game.get('gameDate', '')
             if raw:
@@ -286,17 +282,14 @@ def render_card(g):
 
     score_html = render_score_banner(g)
 
-    # For final/live games, skip pitcher stats block to save space
-    pitchers_html = ''
-    if state not in ('Final',):
-        pitchers_html = f'''
-        <div class="pr">
-          {render_pitcher_block(g["away_pitcher"], g["away_p_stats"])}
-          {render_pitcher_block(g["home_pitcher"], g["home_p_stats"])}
-        </div>'''
+    pitchers_html = f'''
+    <div class="pr">
+      {render_pitcher_block(g["away_pitcher"], g["away_p_stats"])}
+      {render_pitcher_block(g["home_pitcher"], g["home_p_stats"])}
+    </div>'''
 
     lineups_html = ''
-    if g['lineup_confirmed'] and state != 'Final':
+    if g['lineup_confirmed']:
         away_li = ''.join(f'<li>{p}</li>' for p in g['away_lineup'])
         home_li = ''.join(f'<li>{p}</li>' for p in g['home_lineup'])
         lineups_html = (f'<details class="lu"><summary>📋 View Lineups</summary>'
@@ -304,10 +297,9 @@ def render_card(g):
                         f'<div><b>{g["away_team"]}</b><ol>{away_li}</ol></div>'
                         f'<div><b>{g["home_team"]}</b><ol>{home_li}</ol></div>'
                         f'</div></details>')
-    elif state != 'Final' and not g['lineup_confirmed']:
+    elif state not in ('Final', 'Live'):
         lineups_html = '<p style="color:#ff6b6b;font-size:0.82em">⏳ Lineup not yet confirmed</p>'
 
-    header_right = ''
     if state == 'Final':
         header_right = '<span class="gt" style="color:#888">FINAL</span>'
     elif state == 'Live':
