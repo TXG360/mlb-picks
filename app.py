@@ -325,7 +325,7 @@ def render_card(g):
 def index():
     pacific = pytz.timezone('America/Los_Angeles')
     now_pt  = datetime.now(pacific)
-    games   = get_todays_games()
+    games   = cached('games_list', get_todays_games)
 
     live      = [g for g in games if g['abstract_state'] == 'Live']
     confirmed = [g for g in games if g['abstract_state'] == 'Preview' and g['lineup_confirmed']]
@@ -399,7 +399,8 @@ def index():
 
 @app.route('/api/games')
 def api_games():
-    return jsonify(get_todays_games())
+    games = cached('games_list', get_todays_games)
+    return jsonify(games)
 
 @app.route('/robots.txt')
 def robots():
