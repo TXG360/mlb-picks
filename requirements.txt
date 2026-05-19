@@ -1,6 +1,4 @@
 flask
 requests
-pybaseball
-pandas
 gunicorn
 pytz
