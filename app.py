@@ -574,5 +574,20 @@ def api_games():
 def robots():
     return "User-agent: *\nAllow: /", 200, {'Content-Type': 'text/plain'}
 
+@app.route('/debug/savant')
+def debug_savant():
+    try:
+        url = (
+            "https://baseballsavant.mlb.com/leaderboard/custom"
+            "?year=2026&type=batter&filter=&sort=4&sortDir=desc"
+            "&min=10&selections=xba,xslg,xwoba,xobp,"
+            "hard_hit_percent,barrel_batted_rate&csv=true"
+        )
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        r = requests.get(url, headers=headers, timeout=15)
+        return f"Status: {r.status_code}<br><pre>{r.text[:3000]}</pre>"
+    except Exception as e:
+        return f"Error: {e}"
+
 if __name__ == '__main__':
     app.run(debug=True)
