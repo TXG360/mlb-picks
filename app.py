@@ -53,6 +53,24 @@ TEAM_CITIES = {
     'San Diego Padres': 'San+Diego+CA', 'Oakland Athletics': 'Sacramento+CA',
 }
 
+# ─── Fuzzy Name Lookup ────────────────────────────────────────────────────────
+def fuzzy_lookup(name, data_dict):
+    if not data_dict or not name:
+        return None
+    if name in data_dict:
+        return data_dict[name]
+    parts = name.split()
+    if not parts:
+        return None
+    last = parts[-1].lower()
+    for key in data_dict:
+        key_parts = key.split()
+        if not key_parts:
+            continue
+        if key_parts[-1].lower() == last:
+            return data_dict[key]
+    return None
+
 # ─── Statcast Batter Data ─────────────────────────────────────────────────────
 def get_statcast_batter_data():
     def fetch():
@@ -68,15 +86,18 @@ def get_statcast_batter_data():
             if r.status_code != 200:
                 print(f"Savant batter CSV status: {r.status_code}")
                 return {}
-
             reader = csv.DictReader(io.StringIO(r.text))
             lookup = {}
             for row in reader:
-                name = row.get('last_name, first_name', '')
+                name = row.get('last_name, first_name', '').strip()
+                if not name:
+                    continue
                 if ',' in name:
                     last, first = name.split(',', 1)
                     name = f"{first.strip()} {last.strip()}"
-                lookup[name.strip()] = {
+                if not name:
+                    continue
+                lookup[name] = {
                     'xwOBA':    row.get('xwoba', 'N/A'),
                     'xBA':      row.get('xba', 'N/A'),
                     'xSLG':     row.get('xslg', 'N/A'),
@@ -105,20 +126,23 @@ def get_statcast_pitcher_data():
             if r.status_code != 200:
                 print(f"Savant pitcher CSV status: {r.status_code}")
                 return {}
-
             reader = csv.DictReader(io.StringIO(r.text))
             lookup = {}
             for row in reader:
-                name = row.get('last_name, first_name', '')
+                name = row.get('last_name, first_name', '').strip()
+                if not name:
+                    continue
                 if ',' in name:
                     last, first = name.split(',', 1)
                     name = f"{first.strip()} {last.strip()}"
-                lookup[name.strip()] = {
-                    'xERA':    row.get('xera', 'N/A'),
-                    'xwOBA':   row.get('xwoba', 'N/A'),
-                    'Whiff%':  f"{row.get('whiff_percent', 'N/A')}%",
+                if not name:
+                    continue
+                lookup[name] = {
+                    'xERA':     row.get('xera', 'N/A'),
+                    'xwOBA':    row.get('xwoba', 'N/A'),
+                    'Whiff%':   f"{row.get('whiff_percent', 'N/A')}%",
                     'HardHit%': f"{row.get('hard_hit_percent', 'N/A')}%",
-                    'Barrel%': f"{row.get('barrel_batted_rate', 'N/A')}%",
+                    'Barrel%':  f"{row.get('barrel_batted_rate', 'N/A')}%",
                 }
             print(f"Savant pitcher data loaded: {len(lookup)} players")
             return lookup
@@ -126,17 +150,6 @@ def get_statcast_pitcher_data():
             print(f"Savant pitcher error: {e}")
             return {}
     return cached('statcast_pitchers', fetch)
-
-def fuzzy_lookup(name, data_dict):
-    if not data_dict:
-        return None
-    if name in data_dict:
-        return data_dict[name]
-    last = name.split()[-1].lower()
-    for key in data_dict:
-        if key.split()[-1].lower() == last:
-            return data_dict[key]
-    return None
 
 # ─── Pitcher Stats via MLB API ────────────────────────────────────────────────
 def get_pitcher_stats_mlb(player_id, pitcher_name):
@@ -175,7 +188,6 @@ def get_pitcher_stats_mlb(player_id, pitcher_name):
                 'GS':   gs,
             }
 
-            # Merge Statcast pitcher data
             sc = fuzzy_lookup(pitcher_name, get_statcast_pitcher_data())
             if sc:
                 base.update(sc)
@@ -193,16 +205,16 @@ def stat_color(stat, value):
     except:
         return ''
     rules = {
-        'ERA':      ([(3.0,'elite'),(3.75,'good'),(4.5,'avg')],  False),
-        'WHIP':     ([(1.1,'elite'),(1.25,'good'),(1.4,'avg')],  False),
-        'K%':       ([(28,'elite'),(23,'good'),(18,'avg')],      True),
-        'BB%':      ([(5,'elite'),(7,'good'),(9,'avg')],         False),
-        'HR/9':     ([(0.8,'elite'),(1.1,'good'),(1.4,'avg')],   False),
-        'xERA':     ([(3.0,'elite'),(3.75,'good'),(4.5,'avg')],  False),
-        'Whiff%':   ([(30,'elite'),(24,'good'),(18,'avg')],      True),
+        'ERA':      ([(3.0,'elite'),(3.75,'good'),(4.5,'avg')],      False),
+        'WHIP':     ([(1.1,'elite'),(1.25,'good'),(1.4,'avg')],      False),
+        'K%':       ([(28,'elite'),(23,'good'),(18,'avg')],          True),
+        'BB%':      ([(5,'elite'),(7,'good'),(9,'avg')],             False),
+        'HR/9':     ([(0.8,'elite'),(1.1,'good'),(1.4,'avg')],       False),
+        'xERA':     ([(3.0,'elite'),(3.75,'good'),(4.5,'avg')],      False),
+        'Whiff%':   ([(30,'elite'),(24,'good'),(18,'avg')],          True),
         'xwOBA':    ([(0.290,'elite'),(0.320,'good'),(0.350,'avg')], False),
-        'HardHit%': ([(45,'elite'),(40,'good'),(35,'avg')],      True),
-        'Barrel%':  ([(10,'elite'),(7,'good'),(5,'avg')],        True),
+        'HardHit%': ([(45,'elite'),(40,'good'),(35,'avg')],          True),
+        'Barrel%':  ([(10,'elite'),(7,'good'),(5,'avg')],            True),
     }
     if stat not in rules:
         return ''
@@ -289,20 +301,18 @@ def get_todays_games():
             if 'lineups' in game:
                 for p in game.get('lineups', {}).get('awayPlayers', []):
                     name = p.get('fullName', '')
+                    if not name:
+                        continue
                     away_lineup.append(name)
                     sc = fuzzy_lookup(name, batter_sc)
-                    away_lineup_sc.append({
-                        'name': name,
-                        'statcast': sc or {}
-                    })
+                    away_lineup_sc.append({'name': name, 'statcast': sc or {}})
                 for p in game.get('lineups', {}).get('homePlayers', []):
                     name = p.get('fullName', '')
+                    if not name:
+                        continue
                     home_lineup.append(name)
                     sc = fuzzy_lookup(name, batter_sc)
-                    home_lineup_sc.append({
-                        'name': name,
-                        'statcast': sc or {}
-                    })
+                    home_lineup_sc.append({'name': name, 'statcast': sc or {}})
 
             games.append({
                 'game_id':          game['gamePk'],
