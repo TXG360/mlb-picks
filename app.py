@@ -71,6 +71,10 @@ def fuzzy_lookup(name, data_dict):
             return data_dict[key]
     return None
 
+def clean(val):
+    """Strip quotes and whitespace from CSV values."""
+    return str(val).strip().strip('"').strip("'").strip()
+
 # ─── Statcast Batter Data ─────────────────────────────────────────────────────
 def get_statcast_batter_data():
     def fetch():
@@ -86,23 +90,29 @@ def get_statcast_batter_data():
             if r.status_code != 200:
                 print(f"Savant batter CSV status: {r.status_code}")
                 return {}
-            reader = csv.DictReader(io.StringIO(r.text))
+
+            # Strip BOM if present
+            text = r.text.lstrip('\ufeff')
+            reader = csv.DictReader(io.StringIO(text))
             lookup = {}
             for row in reader:
-                name = row.get('last_name, first_name', '').strip()
-                if not name:
+                raw_name = clean(row.get('last_name, first_name', ''))
+                if not raw_name or ',' not in raw_name:
                     continue
-                if ',' in name:
-                    last, first = name.split(',', 1)
-                    name = f"{first.strip()} {last.strip()}"
-                if not name:
+                last, first = raw_name.split(',', 1)
+                name = f"{first.strip()} {last.strip()}"
+                if not name.strip():
                     continue
+
+                hh  = clean(row.get('hard_hit_percent', ''))
+                bar = clean(row.get('barrel_batted_rate', ''))
+
                 lookup[name] = {
-                    'xwOBA':    row.get('xwoba', 'N/A'),
-                    'xBA':      row.get('xba', 'N/A'),
-                    'xSLG':     row.get('xslg', 'N/A'),
-                    'HardHit%': f"{row.get('hard_hit_percent', 'N/A')}%",
-                    'Barrel%':  f"{row.get('barrel_batted_rate', 'N/A')}%",
+                    'xwOBA':    clean(row.get('xwoba', 'N/A')),
+                    'xBA':      clean(row.get('xba', 'N/A')),
+                    'xSLG':     clean(row.get('xslg', 'N/A')),
+                    'HardHit%': f"{hh}%" if hh else 'N/A',
+                    'Barrel%':  f"{bar}%" if bar else 'N/A',
                 }
             print(f"Savant batter data loaded: {len(lookup)} players")
             return lookup
@@ -126,23 +136,29 @@ def get_statcast_pitcher_data():
             if r.status_code != 200:
                 print(f"Savant pitcher CSV status: {r.status_code}")
                 return {}
-            reader = csv.DictReader(io.StringIO(r.text))
+
+            text = r.text.lstrip('\ufeff')
+            reader = csv.DictReader(io.StringIO(text))
             lookup = {}
             for row in reader:
-                name = row.get('last_name, first_name', '').strip()
-                if not name:
+                raw_name = clean(row.get('last_name, first_name', ''))
+                if not raw_name or ',' not in raw_name:
                     continue
-                if ',' in name:
-                    last, first = name.split(',', 1)
-                    name = f"{first.strip()} {last.strip()}"
-                if not name:
+                last, first = raw_name.split(',', 1)
+                name = f"{first.strip()} {last.strip()}"
+                if not name.strip():
                     continue
+
+                hh     = clean(row.get('hard_hit_percent', ''))
+                bar    = clean(row.get('barrel_batted_rate', ''))
+                whiff  = clean(row.get('whiff_percent', ''))
+
                 lookup[name] = {
-                    'xERA':     row.get('xera', 'N/A'),
-                    'xwOBA':    row.get('xwoba', 'N/A'),
-                    'Whiff%':   f"{row.get('whiff_percent', 'N/A')}%",
-                    'HardHit%': f"{row.get('hard_hit_percent', 'N/A')}%",
-                    'Barrel%':  f"{row.get('barrel_batted_rate', 'N/A')}%",
+                    'xERA':     clean(row.get('xera', 'N/A')),
+                    'xwOBA':    clean(row.get('xwoba', 'N/A')),
+                    'Whiff%':   f"{whiff}%" if whiff else 'N/A',
+                    'HardHit%': f"{hh}%" if hh else 'N/A',
+                    'Barrel%':  f"{bar}%" if bar else 'N/A',
                 }
             print(f"Savant pitcher data loaded: {len(lookup)} players")
             return lookup
