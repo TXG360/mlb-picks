@@ -2,6 +2,8 @@ from flask import Flask, jsonify
 import requests
 from datetime import datetime
 import pytz
+import csv
+import io
 
 app = Flask(__name__)
 
@@ -51,8 +53,93 @@ TEAM_CITIES = {
     'San Diego Padres': 'San+Diego+CA', 'Oakland Athletics': 'Sacramento+CA',
 }
 
+# ─── Statcast Batter Data ─────────────────────────────────────────────────────
+def get_statcast_batter_data():
+    def fetch():
+        try:
+            url = (
+                "https://baseballsavant.mlb.com/leaderboard/custom"
+                "?year=2026&type=batter&filter=&sort=4&sortDir=desc"
+                "&min=10&selections=xba,xslg,xwoba,xobp,"
+                "hard_hit_percent,barrel_batted_rate&csv=true"
+            )
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            r = requests.get(url, headers=headers, timeout=15)
+            if r.status_code != 200:
+                print(f"Savant batter CSV status: {r.status_code}")
+                return {}
+
+            reader = csv.DictReader(io.StringIO(r.text))
+            lookup = {}
+            for row in reader:
+                name = row.get('last_name, first_name', '')
+                if ',' in name:
+                    last, first = name.split(',', 1)
+                    name = f"{first.strip()} {last.strip()}"
+                lookup[name.strip()] = {
+                    'xwOBA':    row.get('xwoba', 'N/A'),
+                    'xBA':      row.get('xba', 'N/A'),
+                    'xSLG':     row.get('xslg', 'N/A'),
+                    'HardHit%': f"{row.get('hard_hit_percent', 'N/A')}%",
+                    'Barrel%':  f"{row.get('barrel_batted_rate', 'N/A')}%",
+                }
+            print(f"Savant batter data loaded: {len(lookup)} players")
+            return lookup
+        except Exception as e:
+            print(f"Savant batter error: {e}")
+            return {}
+    return cached('statcast_batters', fetch)
+
+# ─── Statcast Pitcher Data ────────────────────────────────────────────────────
+def get_statcast_pitcher_data():
+    def fetch():
+        try:
+            url = (
+                "https://baseballsavant.mlb.com/leaderboard/custom"
+                "?year=2026&type=pitcher&filter=&sort=4&sortDir=desc"
+                "&min=10&selections=xera,xba,xslg,xwoba,"
+                "hard_hit_percent,barrel_batted_rate,whiff_percent&csv=true"
+            )
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            r = requests.get(url, headers=headers, timeout=15)
+            if r.status_code != 200:
+                print(f"Savant pitcher CSV status: {r.status_code}")
+                return {}
+
+            reader = csv.DictReader(io.StringIO(r.text))
+            lookup = {}
+            for row in reader:
+                name = row.get('last_name, first_name', '')
+                if ',' in name:
+                    last, first = name.split(',', 1)
+                    name = f"{first.strip()} {last.strip()}"
+                lookup[name.strip()] = {
+                    'xERA':    row.get('xera', 'N/A'),
+                    'xwOBA':   row.get('xwoba', 'N/A'),
+                    'Whiff%':  f"{row.get('whiff_percent', 'N/A')}%",
+                    'HardHit%': f"{row.get('hard_hit_percent', 'N/A')}%",
+                    'Barrel%': f"{row.get('barrel_batted_rate', 'N/A')}%",
+                }
+            print(f"Savant pitcher data loaded: {len(lookup)} players")
+            return lookup
+        except Exception as e:
+            print(f"Savant pitcher error: {e}")
+            return {}
+    return cached('statcast_pitchers', fetch)
+
+def fuzzy_lookup(name, data_dict):
+    if not data_dict:
+        return None
+    if name in data_dict:
+        return data_dict[name]
+    last = name.split()[-1].lower()
+    for key in data_dict:
+        if key.split()[-1].lower() == last:
+            return data_dict[key]
+    return None
+
 # ─── Pitcher Stats via MLB API ────────────────────────────────────────────────
-def get_pitcher_stats_mlb(player_id):
+def get_pitcher_stats_mlb(player_id, pitcher_name):
     if not player_id:
         return None
     def fetch():
@@ -78,7 +165,7 @@ def get_pitcher_stats_mlb(player_id):
             bb_pct = round((bb / bf) * 100, 1) if bf else 0
             hr9    = round((hr / ip) * 9, 2) if ip else 0
 
-            return {
+            base = {
                 'ERA':  round(era, 2),
                 'WHIP': round(whip, 2),
                 'K%':   f"{k_pct}%",
@@ -87,6 +174,13 @@ def get_pitcher_stats_mlb(player_id):
                 'IP':   round(ip, 1),
                 'GS':   gs,
             }
+
+            # Merge Statcast pitcher data
+            sc = fuzzy_lookup(pitcher_name, get_statcast_pitcher_data())
+            if sc:
+                base.update(sc)
+
+            return base
         except Exception as e:
             print(f"MLB stats error for player {player_id}: {e}")
             return None
@@ -99,11 +193,16 @@ def stat_color(stat, value):
     except:
         return ''
     rules = {
-        'ERA':  ([(3.0,'elite'),(3.75,'good'),(4.5,'avg')], False),
-        'WHIP': ([(1.1,'elite'),(1.25,'good'),(1.4,'avg')], False),
-        'K%':   ([(28,'elite'),(23,'good'),(18,'avg')],     True),
-        'BB%':  ([(5,'elite'),(7,'good'),(9,'avg')],        False),
-        'HR/9': ([(0.8,'elite'),(1.1,'good'),(1.4,'avg')],  False),
+        'ERA':      ([(3.0,'elite'),(3.75,'good'),(4.5,'avg')],  False),
+        'WHIP':     ([(1.1,'elite'),(1.25,'good'),(1.4,'avg')],  False),
+        'K%':       ([(28,'elite'),(23,'good'),(18,'avg')],      True),
+        'BB%':      ([(5,'elite'),(7,'good'),(9,'avg')],         False),
+        'HR/9':     ([(0.8,'elite'),(1.1,'good'),(1.4,'avg')],   False),
+        'xERA':     ([(3.0,'elite'),(3.75,'good'),(4.5,'avg')],  False),
+        'Whiff%':   ([(30,'elite'),(24,'good'),(18,'avg')],      True),
+        'xwOBA':    ([(0.290,'elite'),(0.320,'good'),(0.350,'avg')], False),
+        'HardHit%': ([(45,'elite'),(40,'good'),(35,'avg')],      True),
+        'Barrel%':  ([(10,'elite'),(7,'good'),(5,'avg')],        True),
     }
     if stat not in rules:
         return ''
@@ -146,6 +245,8 @@ def get_todays_games():
            f"&hydrate=probablePitcher,lineups,team,venue,game,linescore")
     data = requests.get(url).json()
 
+    batter_sc = get_statcast_batter_data()
+
     games = []
     for date_entry in data.get('dates', []):
         for game in date_entry.get('games', []):
@@ -183,11 +284,25 @@ def get_todays_games():
             home_p_id   = home_p_data.get('id')
 
             away_lineup, home_lineup = [], []
+            away_lineup_sc, home_lineup_sc = [], []
+
             if 'lineups' in game:
                 for p in game.get('lineups', {}).get('awayPlayers', []):
-                    away_lineup.append(p.get('fullName', ''))
+                    name = p.get('fullName', '')
+                    away_lineup.append(name)
+                    sc = fuzzy_lookup(name, batter_sc)
+                    away_lineup_sc.append({
+                        'name': name,
+                        'statcast': sc or {}
+                    })
                 for p in game.get('lineups', {}).get('homePlayers', []):
-                    home_lineup.append(p.get('fullName', ''))
+                    name = p.get('fullName', '')
+                    home_lineup.append(name)
+                    sc = fuzzy_lookup(name, batter_sc)
+                    home_lineup_sc.append({
+                        'name': name,
+                        'statcast': sc or {}
+                    })
 
             games.append({
                 'game_id':          game['gamePk'],
@@ -201,10 +316,12 @@ def get_todays_games():
                 'inning_info':      inning_info,
                 'away_pitcher':     away_p,
                 'home_pitcher':     home_p,
-                'away_p_stats':     get_pitcher_stats_mlb(away_p_id),
-                'home_p_stats':     get_pitcher_stats_mlb(home_p_id),
+                'away_p_stats':     get_pitcher_stats_mlb(away_p_id, away_p),
+                'home_p_stats':     get_pitcher_stats_mlb(home_p_id, home_p),
                 'away_lineup':      away_lineup,
                 'home_lineup':      home_lineup,
+                'away_lineup_sc':   away_lineup_sc,
+                'home_lineup_sc':   home_lineup_sc,
                 'lineup_confirmed': len(away_lineup) > 0 and len(home_lineup) > 0,
                 'weather':          get_weather(home_team),
                 'park_factor':      PARK_FACTORS.get(home_team, 100),
@@ -218,16 +335,44 @@ def render_pitcher_block(name, stats):
                 f'<p class="pname">⚾ {name}</p>'
                 f'<p style="color:#888;font-size:0.8em">Stats unavailable</p>'
                 f'</div>')
-    keys = ['ERA', 'WHIP', 'K%', 'BB%', 'HR/9']
-    grid = ''.join(
-        f'<div class="sc"><span class="sl">{k}</span>'
-        f'<span class="sv {stat_color(k, stats.get(k,"N/A"))}">{stats.get(k,"N/A")}</span></div>'
-        for k in keys
-    )
+
+    base_keys = ['ERA', 'WHIP', 'K%', 'BB%', 'HR/9']
+    sc_keys   = ['xERA', 'Whiff%', 'HardHit%', 'Barrel%', 'xwOBA']
+
+    def stat_cell(k, v):
+        return (f'<div class="sc"><span class="sl">{k}</span>'
+                f'<span class="sv {stat_color(k, v)}">{v}</span></div>')
+
+    base_grid = ''.join(stat_cell(k, stats.get(k, 'N/A')) for k in base_keys)
+    sc_grid   = ''.join(stat_cell(k, stats.get(k, 'N/A')) for k in sc_keys)
+
     return (f'<div class="pitcher-block">'
             f'<p class="pname">⚾ {name} '
             f'<span style="color:#888;font-size:0.75em">({stats["GS"]} GS · {stats["IP"]} IP)</span></p>'
-            f'<div class="sgrid">{grid}</div></div>')
+            f'<div class="sgrid">{base_grid}</div>'
+            f'<div class="sgrid" style="margin-top:4px">{sc_grid}</div>'
+            f'</div>')
+
+def render_lineup_sc(lineup_sc, team_name):
+    if not lineup_sc:
+        return ''
+    rows = ''
+    for p in lineup_sc:
+        sc = p.get('statcast', {})
+        if sc:
+            rows += (f'<tr><td>{p["name"]}</td>'
+                     f'<td class="{stat_color("xwOBA", sc.get("xwOBA","N/A"))}">{sc.get("xwOBA","—")}</td>'
+                     f'<td class="{stat_color("HardHit%", sc.get("HardHit%","N/A"))}">{sc.get("HardHit%","—")}</td>'
+                     f'<td class="{stat_color("Barrel%", sc.get("Barrel%","N/A"))}">{sc.get("Barrel%","—")}</td>'
+                     f'</tr>')
+        else:
+            rows += f'<tr><td>{p["name"]}</td><td>—</td><td>—</td><td>—</td></tr>'
+
+    return (f'<div class="sc-table-wrap">'
+            f'<p class="sc-title">📊 {team_name} Statcast</p>'
+            f'<table class="sc-table">'
+            f'<tr><th>Batter</th><th>xwOBA</th><th>HardHit%</th><th>Barrel%</th></tr>'
+            f'{rows}</table></div>')
 
 def render_score_banner(g):
     state = g['abstract_state']
@@ -288,13 +433,19 @@ def render_card(g):
 
     lineups_html = ''
     if g['lineup_confirmed']:
+        away_sc_table = render_lineup_sc(g.get('away_lineup_sc', []), g['away_team'])
+        home_sc_table = render_lineup_sc(g.get('home_lineup_sc', []), g['home_team'])
         away_li = ''.join(f'<li>{p}</li>' for p in g['away_lineup'])
         home_li = ''.join(f'<li>{p}</li>' for p in g['home_lineup'])
-        lineups_html = (f'<details class="lu"><summary>📋 View Lineups</summary>'
-                        f'<div class="lu-row">'
-                        f'<div><b>{g["away_team"]}</b><ol>{away_li}</ol></div>'
-                        f'<div><b>{g["home_team"]}</b><ol>{home_li}</ol></div>'
-                        f'</div></details>')
+        lineups_html = (
+            f'<details class="lu"><summary>📋 View Lineups + Statcast</summary>'
+            f'<div class="lu-row">'
+            f'<div><b>{g["away_team"]}</b><ol>{away_li}</ol></div>'
+            f'<div><b>{g["home_team"]}</b><ol>{home_li}</ol></div>'
+            f'</div>'
+            f'<div class="sc-tables-row">{away_sc_table}{home_sc_table}</div>'
+            f'</details>'
+        )
     elif state not in ('Final', 'Live'):
         lineups_html = '<p style="color:#ff6b6b;font-size:0.82em">⏳ Lineup not yet confirmed</p>'
 
@@ -373,6 +524,13 @@ def index():
     .lu-row{display:flex;gap:16px;flex-wrap:wrap;margin-top:8px;font-size:0.78em;color:#ccc}
     .lu-row ol{padding-left:18px;margin-top:4px}
     .lu-row li{margin:2px 0}
+    .sc-tables-row{display:flex;gap:16px;flex-wrap:wrap;margin-top:12px}
+    .sc-table-wrap{flex:1;min-width:240px}
+    .sc-title{color:#7ec8e3;font-size:0.8em;margin-bottom:6px}
+    .sc-table{width:100%;border-collapse:collapse;font-size:0.75em}
+    .sc-table th{color:#888;text-align:left;padding:3px 6px;border-bottom:1px solid #1a2540}
+    .sc-table td{padding:3px 6px;border-bottom:1px solid #0f1929}
+    .sc-table tr:hover td{background:#1a2540}
     """
 
     def section(title, color, items):
