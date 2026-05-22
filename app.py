@@ -72,7 +72,6 @@ def fuzzy_lookup(name, data_dict):
     return None
 
 def clean(val):
-    """Strip quotes and whitespace from CSV values."""
     return str(val).strip().strip('"').strip("'").strip()
 
 # ─── Statcast Batter Data ─────────────────────────────────────────────────────
@@ -90,8 +89,6 @@ def get_statcast_batter_data():
             if r.status_code != 200:
                 print(f"Savant batter CSV status: {r.status_code}")
                 return {}
-
-            # Strip BOM if present
             text = r.text.lstrip('\ufeff')
             reader = csv.DictReader(io.StringIO(text))
             lookup = {}
@@ -103,10 +100,8 @@ def get_statcast_batter_data():
                 name = f"{first.strip()} {last.strip()}"
                 if not name.strip():
                     continue
-
                 hh  = clean(row.get('hard_hit_percent', ''))
                 bar = clean(row.get('barrel_batted_rate', ''))
-
                 lookup[name] = {
                     'xwOBA':    clean(row.get('xwoba', 'N/A')),
                     'xBA':      clean(row.get('xba', 'N/A')),
@@ -136,7 +131,6 @@ def get_statcast_pitcher_data():
             if r.status_code != 200:
                 print(f"Savant pitcher CSV status: {r.status_code}")
                 return {}
-
             text = r.text.lstrip('\ufeff')
             reader = csv.DictReader(io.StringIO(text))
             lookup = {}
@@ -148,11 +142,9 @@ def get_statcast_pitcher_data():
                 name = f"{first.strip()} {last.strip()}"
                 if not name.strip():
                     continue
-
-                hh     = clean(row.get('hard_hit_percent', ''))
-                bar    = clean(row.get('barrel_batted_rate', ''))
-                whiff  = clean(row.get('whiff_percent', ''))
-
+                hh    = clean(row.get('hard_hit_percent', ''))
+                bar   = clean(row.get('barrel_batted_rate', ''))
+                whiff = clean(row.get('whiff_percent', ''))
                 lookup[name] = {
                     'xERA':     clean(row.get('xera', 'N/A')),
                     'xwOBA':    clean(row.get('xwoba', 'N/A')),
@@ -180,7 +172,6 @@ def get_pitcher_stats_mlb(player_id, pitcher_name):
             if not splits:
                 return None
             s = splits[0]['stat']
-
             ip   = float(s.get('inningsPitched', 0))
             gs   = int(s.get('gamesStarted', 0))
             era  = float(s.get('era', 0))
@@ -189,11 +180,9 @@ def get_pitcher_stats_mlb(player_id, pitcher_name):
             bb   = int(s.get('baseOnBalls', 0))
             bf   = int(s.get('battersFaced', 1))
             hr   = int(s.get('homeRuns', 0))
-
             k_pct  = round((k / bf) * 100, 1) if bf else 0
             bb_pct = round((bb / bf) * 100, 1) if bf else 0
             hr9    = round((hr / ip) * 9, 2) if ip else 0
-
             base = {
                 'ERA':  round(era, 2),
                 'WHIP': round(whip, 2),
@@ -203,11 +192,9 @@ def get_pitcher_stats_mlb(player_id, pitcher_name):
                 'IP':   round(ip, 1),
                 'GS':   gs,
             }
-
             sc = fuzzy_lookup(pitcher_name, get_statcast_pitcher_data())
             if sc:
                 base.update(sc)
-
             return base
         except Exception as e:
             print(f"MLB stats error for player {player_id}: {e}")
@@ -272,29 +259,23 @@ def get_todays_games():
            f"?sportId=1&date={today}"
            f"&hydrate=probablePitcher,lineups,team,venue,game,linescore")
     data = requests.get(url).json()
-
     batter_sc = get_statcast_batter_data()
-
     games = []
     for date_entry in data.get('dates', []):
         for game in date_entry.get('games', []):
             away_team = game['teams']['away']['team']['name']
             home_team = game['teams']['home']['team']['name']
-
             status         = game.get('status', {})
             abstract_state = status.get('abstractGameState', '')
             detailed_state = status.get('detailedState', '')
-
             away_score = game['teams']['away'].get('score', None)
             home_score = game['teams']['home'].get('score', None)
-
             inning_info = ''
             if abstract_state == 'Live':
                 ls          = game.get('linescore', {})
                 inning      = ls.get('currentInningOrdinal', '')
                 half        = ls.get('inningHalf', '')
                 inning_info = f"{half} {inning}"
-
             game_time_pt = ''
             raw = game.get('gameDate', '')
             if raw:
@@ -303,17 +284,14 @@ def get_todays_games():
                     game_time_pt = utc_dt.astimezone(pacific).strftime('%-I:%M %p PT')
                 except:
                     pass
-
             away_p_data = game['teams']['away'].get('probablePitcher', {})
             home_p_data = game['teams']['home'].get('probablePitcher', {})
             away_p      = away_p_data.get('fullName', 'TBD')
             home_p      = home_p_data.get('fullName', 'TBD')
             away_p_id   = away_p_data.get('id')
             home_p_id   = home_p_data.get('id')
-
             away_lineup, home_lineup = [], []
             away_lineup_sc, home_lineup_sc = [], []
-
             if 'lineups' in game:
                 for p in game.get('lineups', {}).get('awayPlayers', []):
                     name = p.get('fullName', '')
@@ -329,7 +307,6 @@ def get_todays_games():
                     home_lineup.append(name)
                     sc = fuzzy_lookup(name, batter_sc)
                     home_lineup_sc.append({'name': name, 'statcast': sc or {}})
-
             games.append({
                 'game_id':          game['gamePk'],
                 'away_team':        away_team,
@@ -361,17 +338,13 @@ def render_pitcher_block(name, stats):
                 f'<p class="pname">⚾ {name}</p>'
                 f'<p style="color:#888;font-size:0.8em">Stats unavailable</p>'
                 f'</div>')
-
     base_keys = ['ERA', 'WHIP', 'K%', 'BB%', 'HR/9']
     sc_keys   = ['xERA', 'Whiff%', 'HardHit%', 'Barrel%', 'xwOBA']
-
     def stat_cell(k, v):
         return (f'<div class="sc"><span class="sl">{k}</span>'
                 f'<span class="sv {stat_color(k, v)}">{v}</span></div>')
-
     base_grid = ''.join(stat_cell(k, stats.get(k, 'N/A')) for k in base_keys)
     sc_grid   = ''.join(stat_cell(k, stats.get(k, 'N/A')) for k in sc_keys)
-
     return (f'<div class="pitcher-block">'
             f'<p class="pname">⚾ {name} '
             f'<span style="color:#888;font-size:0.75em">({stats["GS"]} GS · {stats["IP"]} IP)</span></p>'
@@ -393,7 +366,6 @@ def render_lineup_sc(lineup_sc, team_name):
                      f'</tr>')
         else:
             rows += f'<tr><td>{p["name"]}</td><td>—</td><td>—</td><td>—</td></tr>'
-
     return (f'<div class="sc-table-wrap">'
             f'<p class="sc-title">📊 {team_name} Statcast</p>'
             f'<table class="sc-table">'
@@ -408,6 +380,12 @@ def render_score_banner(g):
     hs    = g['home_score']
 
     if state == 'Final':
+        # ── FIX: guard against None scores ──
+        if as_ is None or hs is None:
+            return (f'<div class="score-banner final">'
+                    f'<span class="score-teams">{away} — {home}</span>'
+                    f'<span class="score-label">FINAL</span>'
+                    f'</div>')
         winner = away if as_ > hs else home
         return (f'<div class="score-banner final">'
                 f'<span class="score-teams">{away} <span class="score-num">{as_}</span> '
@@ -415,9 +393,11 @@ def render_score_banner(g):
                 f'<span class="score-label">FINAL · {winner} Win</span>'
                 f'</div>')
     elif state == 'Live':
+        as_disp = as_ if as_ is not None else 0
+        hs_disp = hs if hs is not None else 0
         return (f'<div class="score-banner live">'
-                f'<span class="score-teams">{away} <span class="score-num">{as_}</span> '
-                f'— <span class="score-num">{hs}</span> {home}</span>'
+                f'<span class="score-teams">{away} <span class="score-num">{as_disp}</span> '
+                f'— <span class="score-num">{hs_disp}</span> {home}</span>'
                 f'<span class="score-label">🔴 LIVE · {g["inning_info"]}</span>'
                 f'</div>')
     return ''
@@ -425,7 +405,6 @@ def render_score_banner(g):
 def render_card(g):
     state = g['abstract_state']
     pf    = g['park_factor']
-
     if state == 'Final':
         border_cls = 'final-game'
     elif state == 'Live':
@@ -434,12 +413,10 @@ def render_card(g):
         border_cls = 'confirmed'
     else:
         border_cls = 'pending'
-
     pf_label = ('🔴 Hitter Friendly' if pf >= 105 else
                 '🟢 Pitcher Friendly' if pf <= 95 else '⚪ Neutral')
     pf_cls   = ('hitter' if pf >= 105 else
                 'pitcher-park' if pf <= 95 else 'neutral')
-
     weather_html = ''
     w = g.get('weather')
     if w:
@@ -448,15 +425,12 @@ def render_card(g):
         else:
             weather_html = (f'<span class="badge wx">'
                             f'🌤️ {w["label"]} · {w["temp"]} · 💨 {w["wind"]}</span>')
-
     score_html = render_score_banner(g)
-
     pitchers_html = f'''
     <div class="pr">
       {render_pitcher_block(g["away_pitcher"], g["away_p_stats"])}
       {render_pitcher_block(g["home_pitcher"], g["home_p_stats"])}
     </div>'''
-
     lineups_html = ''
     if g['lineup_confirmed']:
         away_sc_table = render_lineup_sc(g.get('away_lineup_sc', []), g['away_team'])
@@ -474,14 +448,12 @@ def render_card(g):
         )
     elif state not in ('Final', 'Live'):
         lineups_html = '<p style="color:#ff6b6b;font-size:0.82em">⏳ Lineup not yet confirmed</p>'
-
     if state == 'Final':
         header_right = '<span class="gt" style="color:#888">FINAL</span>'
     elif state == 'Live':
         header_right = f'<span class="gt" style="color:#ff4444">🔴 LIVE · {g["inning_info"]}</span>'
     else:
         header_right = f'<span class="gt">🕐 {g["game_time"]}</span>'
-
     return f'''
     <div class="game {border_cls}">
       <div class="gh">
@@ -503,12 +475,10 @@ def index():
     pacific = pytz.timezone('America/Los_Angeles')
     now_pt  = datetime.now(pacific)
     games   = cached('games_list', get_todays_games)
-
     live      = [g for g in games if g['abstract_state'] == 'Live']
     confirmed = [g for g in games if g['abstract_state'] == 'Preview' and g['lineup_confirmed']]
     pending   = [g for g in games if g['abstract_state'] == 'Preview' and not g['lineup_confirmed']]
     final     = [g for g in games if g['abstract_state'] == 'Final']
-
     css = """
     *{box-sizing:border-box;margin:0;padding:0}
     body{font-family:Arial,sans-serif;background:#1a1a2e;color:#eee;padding:16px;max-width:1100px;margin:auto}
@@ -558,13 +528,11 @@ def index():
     .sc-table td{padding:3px 6px;border-bottom:1px solid #0f1929}
     .sc-table tr:hover td{background:#1a2540}
     """
-
     def section(title, color, items):
         if not items:
             return ''
         return (f'<h2 style="color:{color}">{title} ({len(items)} games)</h2>'
                 + ''.join(render_card(g) for g in items))
-
     html = f"""<!DOCTYPE html><html>
     <head>
       <title>MLB V2 – {now_pt.strftime('%b %d, %Y')}</title>
