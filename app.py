@@ -382,6 +382,17 @@ def get_todays_games():
                 req_away = evaluate_buzzsaw(home_top4_xwoba)
                 req_home = evaluate_buzzsaw(away_top4_xwoba)
                 
+                # Determine raw lean team
+                if home_adv > away_adv:
+                    raw_lean_team = home_team
+                    max_adv = home_adv
+                elif away_adv > home_adv:
+                    raw_lean_team = away_team
+                    max_adv = away_adv
+                else:
+                    raw_lean_team = "Tie"
+                    max_adv = 0
+                
                 if away_adv >= req_away:
                     v3_pick = f"🟢 PLAY {away_team} ML"
                     v3_color = "#00ff88"
@@ -390,21 +401,21 @@ def get_todays_games():
                     v3_pick = f"🟢 PLAY {home_team} ML"
                     v3_color = "#00ff88"
                     v3_reason = f"+{home_adv:.2f} Blended Edge (Req: +{req_home:.2f})"
-                elif away_adv >= 0.50:
+                elif away_adv >= 0.40:
                     v3_pick = f"🟡 LEAN {away_team} +1.5"
                     v3_color = "#ffd700"
                     v3_reason = f"+{away_adv:.2f} Edge (Under Buzzsaw Req: +{req_away:.2f})"
-                elif home_adv >= 0.50:
+                elif home_adv >= 0.40:
                     v3_pick = f"🟡 LEAN {home_team} +1.5"
                     v3_color = "#ffd700"
                     v3_reason = f"+{home_adv:.2f} Edge (Under Buzzsaw Req: +{req_home:.2f})"
                 else:
-                    v3_pick = "🛑 SKIP"
                     v3_color = "#ff6b6b"
-                    max_adv = max(away_adv, home_adv)
                     if max_adv > 0:
+                        v3_pick = f"🛑 SKIP ({raw_lean_team})"
                         v3_reason = f"Margin too thin (+{max_adv:.2f} edge max)"
                     else:
+                        v3_pick = "🛑 SKIP"
                         v3_reason = "Metrics dead even"
 
             games.append({
