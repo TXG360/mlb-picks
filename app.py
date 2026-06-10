@@ -4,12 +4,20 @@ from datetime import datetime
 import pytz
 import csv
 import io
+import logging
 
 app = Flask(__name__)
 
-# ─── Cache ────────────────────────────────────────────────────────────────────
+# Configure logging for the settlement/gate logic
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+logger = logging.getLogger(__name__)
+
+# ─── Cache & Global State ─────────────────────────────────────────────────────
 _cache = {}
 CACHE_TTL = 3600
+
+# Tracks game state and locks predictions to prevent mid-game drift
+_game_states = {} 
 
 def cached(key, fn):
     now = datetime.utcnow().timestamp()
@@ -355,71 +363,115 @@ def get_todays_games():
                     sc = fuzzy_lookup(name, batter_sc)
                     home_lineup_sc.append({'name': name, 'statcast': sc or {}})
 
-            # ─── V3 Calculation Integration ───
-            away_top4_xwoba = get_top_4_xwoba(away_lineup_sc)
-            home_top4_xwoba = get_top_4_xwoba(home_lineup_sc)
-
-            away_bp = get_bullpen_metrics(away_team)
-            home_bp = get_bullpen_metrics(home_team)
-
-            away_xera_val = away_p_stats.get('xERA') if away_p_stats else None
-            home_xera_val = home_p_stats.get('xERA') if home_p_stats else None
-
-            # Assume 5.5 projected innings for the starter
-            away_blended = blended_pitching_metric(away_xera_val, 5.5, away_bp['SIERA_B'], away_bp['F_m'])
-            home_blended = blended_pitching_metric(home_xera_val, 5.5, home_bp['SIERA_B'], home_bp['F_m'])
+            # ─── STATE GATE & SETTLEMENT LOGIC ───
+            game_id = game['gamePk']
+            current_lineups_hash = hash(tuple(away_lineup + home_lineup))
+            cached_state = _game_states.get(game_id)
 
             v3_pick = "Awaiting Lineups/Pitchers"
             v3_color = "#888"
             v3_reason = "Missing statcast data for calculation"
 
-            if away_blended and home_blended and len(away_lineup) >= 4 and len(home_lineup) >= 4:
-                # Calculate the exact delta advantage
-                away_adv = home_blended - away_blended
-                home_adv = away_blended - home_blended
+            skip_recalc = False
+            trigger_settlement = False
+
+            if cached_state:
+                last_state = cached_state['state']
                 
-                # Check opponent Buzzsaw risk
-                req_away = evaluate_buzzsaw(home_top4_xwoba)
-                req_home = evaluate_buzzsaw(away_top4_xwoba)
+                # 1. HARD GATE: Lock predictions once game is Active or Final (no mid-game sub drift)
+                if abstract_state in ['Live', 'Final']:
+                    skip_recalc = True
+                    if abstract_state == 'Live':
+                        logger.debug(f"Game {game_id} is currently LIVE. Locking prediction logic.")
                 
-                # Determine raw lean team
-                if home_adv > away_adv:
-                    raw_lean_team = home_team
-                    max_adv = home_adv
-                elif away_adv > home_adv:
-                    raw_lean_team = away_team
-                    max_adv = away_adv
-                else:
-                    raw_lean_team = "Tie"
-                    max_adv = 0
-                
-                if away_adv >= req_away:
-                    v3_pick = f"🟢 PLAY {away_team} ML"
-                    v3_color = "#00ff88"
-                    v3_reason = f"+{away_adv:.2f} Blended Edge (Req: +{req_away:.2f})"
-                elif home_adv >= req_home:
-                    v3_pick = f"🟢 PLAY {home_team} ML"
-                    v3_color = "#00ff88"
-                    v3_reason = f"+{home_adv:.2f} Blended Edge (Req: +{req_home:.2f})"
-                elif away_adv >= 0.40:
-                    v3_pick = f"🟡 LEAN {away_team} +1.5"
-                    v3_color = "#ffd700"
-                    v3_reason = f"+{away_adv:.2f} Edge (Under Buzzsaw Req: +{req_away:.2f})"
-                elif home_adv >= 0.40:
-                    v3_pick = f"🟡 LEAN {home_team} +1.5"
-                    v3_color = "#ffd700"
-                    v3_reason = f"+{home_adv:.2f} Edge (Under Buzzsaw Req: +{req_home:.2f})"
-                else:
-                    v3_color = "#ff6b6b"
-                    if max_adv > 0:
-                        v3_pick = f"🛑 SKIP ({raw_lean_team})"
-                        v3_reason = f"Margin too thin (+{max_adv:.2f} edge max)"
+                # 2. DUPLICATE CHECK: No data progression during Preview
+                if abstract_state == 'Preview' and current_lineups_hash == cached_state['lineups_hash']:
+                    skip_recalc = True
+                    
+                # 3. SETTLEMENT FLOOR: State transitioned to Final for the first time
+                if abstract_state == 'Final' and last_state != 'Final':
+                    trigger_settlement = True
+
+            # If skipped, load the locked V3 variables from the cache
+            if skip_recalc and cached_state and 'v3_data' in cached_state:
+                v3_pick = cached_state['v3_data']['pick']
+                v3_color = cached_state['v3_data']['color']
+                v3_reason = cached_state['v3_data']['reason']
+            else:
+                # ─── V3 Calculation Integration ───
+                away_top4_xwoba = get_top_4_xwoba(away_lineup_sc)
+                home_top4_xwoba = get_top_4_xwoba(home_lineup_sc)
+
+                away_bp = get_bullpen_metrics(away_team)
+                home_bp = get_bullpen_metrics(home_team)
+
+                away_xera_val = away_p_stats.get('xERA') if away_p_stats else None
+                home_xera_val = home_p_stats.get('xERA') if home_p_stats else None
+
+                away_blended = blended_pitching_metric(away_xera_val, 5.5, away_bp['SIERA_B'], away_bp['F_m'])
+                home_blended = blended_pitching_metric(home_xera_val, 5.5, home_bp['SIERA_B'], home_bp['F_m'])
+
+                if away_blended and home_blended and len(away_lineup) >= 4 and len(home_lineup) >= 4:
+                    away_adv = home_blended - away_blended
+                    home_adv = away_blended - home_blended
+                    
+                    req_away = evaluate_buzzsaw(home_top4_xwoba)
+                    req_home = evaluate_buzzsaw(away_top4_xwoba)
+                    
+                    if home_adv > away_adv:
+                        raw_lean_team = home_team
+                        max_adv = home_adv
+                    elif away_adv > home_adv:
+                        raw_lean_team = away_team
+                        max_adv = away_adv
                     else:
-                        v3_pick = "🛑 SKIP"
-                        v3_reason = "Metrics dead even"
+                        raw_lean_team = "Tie"
+                        max_adv = 0
+                    
+                    if away_adv >= req_away:
+                        v3_pick = f"🟢 PLAY {away_team} ML"
+                        v3_color = "#00ff88"
+                        v3_reason = f"+{away_adv:.2f} Blended Edge (Req: +{req_away:.2f})"
+                    elif home_adv >= req_home:
+                        v3_pick = f"🟢 PLAY {home_team} ML"
+                        v3_color = "#00ff88"
+                        v3_reason = f"+{home_adv:.2f} Blended Edge (Req: +{req_home:.2f})"
+                    elif away_adv >= 0.40:
+                        v3_pick = f"🟡 LEAN {away_team} +1.5"
+                        v3_color = "#ffd700"
+                        v3_reason = f"+{away_adv:.2f} Edge (Under Buzzsaw Req: +{req_away:.2f})"
+                    elif home_adv >= 0.40:
+                        v3_pick = f"🟡 LEAN {home_team} +1.5"
+                        v3_color = "#ffd700"
+                        v3_reason = f"+{home_adv:.2f} Edge (Under Buzzsaw Req: +{req_home:.2f})"
+                    else:
+                        v3_color = "#ff6b6b"
+                        if max_adv > 0:
+                            v3_pick = f"🛑 SKIP ({raw_lean_team})"
+                            v3_reason = f"Margin too thin (+{max_adv:.2f} edge max)"
+                        else:
+                            v3_pick = "🛑 SKIP"
+                            v3_reason = "Metrics dead even"
+
+            # ALWAYS update the state cache with the latest state so triggers check properly next loop
+            _game_states[game_id] = {
+                'state': abstract_state,
+                'lineups_hash': current_lineups_hash,
+                'v3_data': {
+                    'pick': v3_pick,
+                    'color': v3_color,
+                    'reason': v3_reason
+                }
+            }
+
+            # 4. PROCESS SETTLEMENT: Triggers strictly once per game conclusion
+            if trigger_settlement:
+                logger.info(f"SETTLEMENT TRIGGERED | Game {game_id} | {away_team} ({away_score}) @ {home_team} ({home_score}) | Final Pick: {v3_pick}")
+                # Place execution/bankroll integration function here:
+                # process_game_outcome(game_data)
 
             games.append({
-                'game_id':          game['gamePk'],
+                'game_id':          game_id,
                 'away_team':        away_team,
                 'home_team':        home_team,
                 'game_time':        game_time_pt,
