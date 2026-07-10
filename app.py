@@ -1,4 +1,4 @@
-from flask import Flask, jsonify
+From flask import Flask, jsonify
 import requests
 from datetime import datetime
 import pytz
@@ -76,21 +76,6 @@ def get_top_4_xwoba(lineup_sc):
         except ValueError:
             pass
     return sum(vals) / len(vals) if vals else 0.0
-
-def get_avg_xwoba(lineup_sc):
-    """Calculates the average xwOBA for the full lineup (used for Shadow Tracker totals)."""
-    if not lineup_sc:
-        return 0.315
-    vals = []
-    for p in lineup_sc:
-        val_str = p.get('statcast', {}).get('xwOBA', '0')
-        if val_str in ('N/A', '-', '', None):
-            continue
-        try:
-            vals.append(float(val_str))
-        except ValueError:
-            pass
-    return sum(vals) / len(vals) if vals else 0.315
 
 def evaluate_buzzsaw(opp_top_4_xwoba, base_required_delta=0.75):
     """Scales the required pitching delta exponentially against elite top-of-the-orders."""
@@ -386,7 +371,6 @@ def get_todays_games():
             v3_pick = "Awaiting Lineups/Pitchers"
             v3_color = "#888"
             v3_reason = "Missing statcast data for calculation"
-            shadow_tracker = "Awaiting Projections"
 
             skip_recalc = False
             trigger_settlement = False
@@ -413,7 +397,6 @@ def get_todays_games():
                 v3_pick = cached_state['v3_data']['pick']
                 v3_color = cached_state['v3_data']['color']
                 v3_reason = cached_state['v3_data']['reason']
-                shadow_tracker = cached_state['v3_data'].get('shadow_tracker', 'Awaiting Projections')
             else:
                 # ─── V3 Calculation Integration ───
                 away_top4_xwoba = get_top_4_xwoba(away_lineup_sc)
@@ -425,35 +408,6 @@ def get_todays_games():
                 away_xera_val = away_p_stats.get('xERA') if away_p_stats else None
                 home_xera_val = home_p_stats.get('xERA') if home_p_stats else None
 
-                # ─── Shadow Tracker: Expected Runs Engine ───
-                try:
-                    a_xera = float(away_xera_val) if away_xera_val and away_xera_val != 'N/A' else 4.20
-                except:
-                    a_xera = 4.20
-                    
-                try:
-                    h_xera = float(home_xera_val) if home_xera_val and home_xera_val != 'N/A' else 4.20
-                except:
-                    h_xera = 4.20
-
-                away_avg_xwoba = get_avg_xwoba(away_lineup_sc)
-                home_avg_xwoba = get_avg_xwoba(home_lineup_sc)
-                pf = PARK_FACTORS.get(home_team, 100)
-
-                # Baseline: ~4.3 runs per team per game. Scales dynamically based on xwOBA, xERA, and Park.
-                e_rs_away = 4.3 * (away_avg_xwoba / 0.315) * (h_xera / 4.20) * (pf / 100)
-                e_rs_home = 4.3 * (home_avg_xwoba / 0.315) * (a_xera / 4.20) * (pf / 100)
-                proj_total = e_rs_away + e_rs_home
-
-                if len(away_lineup) > 0 and len(home_lineup) > 0:
-                    if proj_total >= 9.5:
-                        shadow_tracker = f"🔥 HIGH SCORING EXPECTED ({proj_total:.1f} Proj)"
-                    elif proj_total <= 8.0:
-                        shadow_tracker = f"🧊 LOW SCORING EXPECTED ({proj_total:.1f} Proj)"
-                    else:
-                        shadow_tracker = f"⚖️ AVERAGE SCORING EXPECTED ({proj_total:.1f} Proj)"
-
-                # ─── V3 Core Execution Engine ───
                 away_blended = blended_pitching_metric(away_xera_val, 5.5, away_bp['SIERA_B'], away_bp['F_m'])
                 home_blended = blended_pitching_metric(home_xera_val, 5.5, home_bp['SIERA_B'], home_bp['F_m'])
 
@@ -506,8 +460,7 @@ def get_todays_games():
                 'v3_data': {
                     'pick': v3_pick,
                     'color': v3_color,
-                    'reason': v3_reason,
-                    'shadow_tracker': shadow_tracker
+                    'reason': v3_reason
                 }
             }
 
@@ -541,7 +494,6 @@ def get_todays_games():
                 'v3_pick':          v3_pick,
                 'v3_color':         v3_color,
                 'v3_reason':        v3_reason,
-                'shadow_tracker':   shadow_tracker,
             })
     return games
 
@@ -651,15 +603,6 @@ def render_card(g):
     </div>
     '''
 
-    # ─── Shadow Tracker Banner UI ───
-    shadow_html = ''
-    if g['lineup_confirmed']:
-        shadow_html = f'''
-        <div class="shadow-tracker" style="font-size:0.85em;color:#7ec8e3;background:#0a1220;padding:6px 10px;border-radius:4px;margin-bottom:12px;text-align:center;border:1px dashed #1a2540;">
-            [Shadow Tracker: {g.get('shadow_tracker', 'Calculating...')}]
-        </div>
-        '''
-
     pitchers_html = f'''
     <div class="pr">
       {render_pitcher_block(g["away_pitcher"], g["away_p_stats"])}
@@ -699,7 +642,6 @@ def render_card(g):
       </div>
       {score_html}
       {v3_banner}
-      {shadow_html}
       <div class="badges">
         <span class="badge {pf_cls}">🏠 PF {pf} · {pf_label}</span>
         {weather_html}
@@ -740,7 +682,7 @@ def index():
     .score-num{font-size:1.3em;font-weight:bold;color:#ffd700}
     .score-label{font-size:0.78em;color:#888}
     .score-banner.live .score-label{color:#ff6666}
-    .v3-banner{background:#0a0f1a;border:1px solid;padding:10px 14px;margin-bottom:8px;border-radius:6px;display:flex;justify-content:space-between;align-items:center}
+    .v3-banner{background:#0a0f1a;border:1px solid;padding:10px 14px;margin-bottom:12px;border-radius:6px;display:flex;justify-content:space-between;align-items:center}
     .v3-pick{font-weight:bold;font-size:1.05em;letter-spacing:0.5px}
     .v3-reason{color:#aaa;font-size:0.85em;text-align:right}
     .badges{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
@@ -818,4 +760,3 @@ def debug_savant():
 
 if __name__ == '__main__':
     app.run(debug=True)
-
