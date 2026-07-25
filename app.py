@@ -7,6 +7,8 @@ import io
 import logging
 
 app = Flask(__name__)
+
+# Configure logging for the settlement/gate logic
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -38,6 +40,7 @@ PARK_FACTORS = {
 }
 
 INDOOR_TEAMS = {'Tampa Bay Rays', 'Toronto Blue Jays', 'Milwaukee Brewers', 'Minnesota Twins', 'Houston Astros', 'Arizona Diamondbacks', 'Seattle Mariners', 'Miami Marlins'}
+
 TEAM_CITIES = {
     'Colorado Rockies': 'Denver+CO', 'Cincinnati Reds': 'Cincinnati+OH', 'Boston Red Sox': 'Boston+MA', 'Texas Rangers': 'Arlington+TX',
     'Philadelphia Phillies': 'Philadelphia+PA', 'Chicago Cubs': 'Chicago+IL', 'Atlanta Braves': 'Cumberland+GA', 'Baltimore Orioles': 'Baltimore+MD',
@@ -77,8 +80,9 @@ def get_statcast_batter_data():
                 name = f"{first.strip()} {last.strip()}"
                 lookup[name] = {
                     'xwOBA': clean(row.get('xwoba', 'N/A')), 'xBA': clean(row.get('xba', 'N/A')),
-                    'HardHit%': f"{clean(row.get('hard_hit_percent', ''))}%",
-                    'Barrel%': f"{clean(row.get('barrel_batted_rate', ''))}%"
+                    'xSLG': clean(row.get('xslg', 'N/A')),
+                    'HardHit%': f"{clean(row.get('hard_hit_percent', ''))}%" if clean(row.get('hard_hit_percent', '')) else "N/A",
+                    'Barrel%': f"{clean(row.get('barrel_batted_rate', ''))}%" if clean(row.get('barrel_batted_rate', '')) else "N/A"
                 }
             return lookup
         except: return {}
@@ -99,9 +103,9 @@ def get_statcast_pitcher_data():
                 name = f"{first.strip()} {last.strip()}"
                 lookup[name] = {
                     'xERA': clean(row.get('xera', 'N/A')), 'xwOBA': clean(row.get('xwoba', 'N/A')),
-                    'Whiff%': f"{clean(row.get('whiff_percent', ''))}%",
-                    'HardHit%': f"{clean(row.get('hard_hit_percent', ''))}%",
-                    'Barrel%': f"{clean(row.get('barrel_batted_rate', ''))}%"
+                    'Whiff%': f"{clean(row.get('whiff_percent', ''))}%" if clean(row.get('whiff_percent', '')) else "N/A",
+                    'HardHit%': f"{clean(row.get('hard_hit_percent', ''))}%" if clean(row.get('hard_hit_percent', '')) else "N/A",
+                    'Barrel%': f"{clean(row.get('barrel_batted_rate', ''))}%" if clean(row.get('barrel_batted_rate', '')) else "N/A"
                 }
             return lookup
         except: return {}
@@ -114,10 +118,11 @@ def get_pitcher_stats_mlb(player_id, pitcher_name, sc_data):
             data = requests.get(f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats?stats=season&group=pitching&season=2026", timeout=5).json()
             s = data.get('stats', [{}])[0].get('splits', [])[0]['stat']
             ip, gs, bf = float(s.get('inningsPitched', 0)), int(s.get('gamesStarted', 0)), int(s.get('battersFaced', 1))
+            k, bb, hr = int(s.get('strikeOuts', 0)), int(s.get('baseOnBalls', 0)), int(s.get('homeRuns', 0))
             base = {
                 'ERA': round(float(s.get('era', 0)), 2), 'WHIP': round(float(s.get('whip', 0)), 2),
-                'K%': f"{round((int(s.get('strikeOuts', 0))/bf)*100, 1)}%", 'BB%': f"{round((int(s.get('baseOnBalls', 0))/bf)*100, 1)}%",
-                'HR/9': round((int(s.get('homeRuns', 0))/ip)*9, 2) if ip else 0, 'IP': round(ip, 1), 'GS': gs,
+                'K%': f"{round((k/bf)*100, 1)}%" if bf else "0%", 'BB%': f"{round((bb/bf)*100, 1)}%" if bf else "0%",
+                'HR/9': round((hr/ip)*9, 2) if ip else 0, 'IP': round(ip, 1), 'GS': gs,
             }
             sc = fuzzy_lookup(pitcher_name, sc_data)
             if sc: base.update(sc)
@@ -127,22 +132,16 @@ def get_pitcher_stats_mlb(player_id, pitcher_name, sc_data):
 
 # ─── V4.2 Fatigue Engine (3-Day Lookback) ─────────────────────────────────────
 def get_league_fatigue():
-    """
-    Scrapes the MLB schedule for the past 3 days and hydrates the boxscores 
-    to map out daily pitch counts for every reliever.
-    """
     def fetch():
         try:
             pacific = pytz.timezone('America/Los_Angeles')
             today = datetime.now(pacific)
-            d1 = (today - timedelta(days=1)).strftime('%Y-%m-%d')
-            d2 = (today - timedelta(days=2)).strftime('%Y-%m-%d')
-            d3 = (today - timedelta(days=3)).strftime('%Y-%m-%d')
+            d1, d2, d3 = [(today - timedelta(days=i)).strftime('%Y-%m-%d') for i in [1, 2, 3]]
             
             url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate={d3}&endDate={d1}&hydrate=boxscore"
             data = requests.get(url, timeout=10).json()
             
-            fatigue = {} # { player_id: { date_str: pitches } }
+            fatigue = {} 
             for date_entry in data.get('dates', []):
                 d_str = date_entry['date']
                 for game in date_entry.get('games', []):
@@ -160,60 +159,48 @@ def get_league_fatigue():
     return cached('league_fatigue', fetch, ttl=3600)
 
 def get_full_roster_metrics(team_id, starter_name, lineup_names, pitcher_sc, batter_sc):
-    """
-    V4.2: Excludes fatigued pitchers, isolates high-leverage arms, and calculates true bench depth.
-    """
     def fetch():
         try: return requests.get(f"https://statsapi.mlb.com/api/v1/teams/{team_id}/roster/Active?season=2026", timeout=5).json()
         except: return {}
         
     roster = cached(f'roster_{team_id}', fetch).get('roster', [])
     fatigue_sys = get_league_fatigue()
-    fatigue_data = fatigue_sys.get('data', {})
-    d1, d2, d3 = fatigue_sys.get('d1'), fatigue_sys.get('d2'), fatigue_sys.get('d3')
+    f_data, d1, d2, d3 = fatigue_sys.get('data', {}), fatigue_sys.get('d1'), fatigue_sys.get('d2'), fatigue_sys.get('d3')
     
-    available_bp_xeras = []
+    available_bp_xeras, bench_xwobas = [], []
     fatigued_count = 0
-    bench_xwobas = []
     
     for player in roster:
         name = player['person']['fullName']
         pos = player['position']['abbreviation']
         pid = player['person']['id']
         
-        # Bullpen Logic
         if pos in ['P', 'TWP'] and name != starter_name:
             stats = fuzzy_lookup(name, pitcher_sc)
             if stats and stats.get('xERA') not in ('N/A', None, ''):
-                # Check Fatigue
-                f_log = fatigue_data.get(pid, {})
+                f_log = f_data.get(pid, {})
                 p1, p2, p3 = f_log.get(d1, 0), f_log.get(d2, 0), f_log.get(d3, 0)
                 
-                # Rule 1: Threw > 25 pitches yesterday
-                # Rule 2: Pitched back-to-back days (yesterday and day before)
-                # Rule 3: Threw > 45 pitches total in last 3 days
+                # Exclude if threw >25 yesterday, back-to-back days, or >45 past 3 days
                 if p1 > 25 or (p1 > 0 and p2 > 0) or (p1 + p2 + p3) > 45:
                     fatigued_count += 1
-                    continue # Exclude from available pool
-                    
+                    continue 
                 try: available_bp_xeras.append(float(stats['xERA']))
                 except: pass
                 
-        # Bench Bats Logic
         elif pos not in ['P', 'TWP'] and name not in lineup_names:
             stats = fuzzy_lookup(name, batter_sc)
             if stats and stats.get('xwOBA') not in ('N/A', None, ''):
                 try: bench_xwobas.append(float(stats['xwOBA']))
                 except: pass
                 
-    # LEVERAGE FILTER: Sort the rested bullpen arms by xERA and only average the top 4 (A-Bullpen)
     available_bp_xeras.sort()
-    high_leverage_arms = available_bp_xeras[:4] if len(available_bp_xeras) >= 4 else available_bp_xeras
+    high_leverage = available_bp_xeras[:4] if len(available_bp_xeras) >= 4 else available_bp_xeras
     
-    bp_xera = round(sum(high_leverage_arms)/len(high_leverage_arms), 2) if high_leverage_arms else 4.20
+    bp_xera = round(sum(high_leverage)/len(high_leverage), 2) if high_leverage else 4.20
     bench_xwoba = round(sum(bench_xwobas)/len(bench_xwobas), 3) if bench_xwobas else 0.300
     
-    return bp_xera, bench_xwoba, len(high_leverage_arms), fatigued_count
+    return bp_xera, bench_xwoba, len(high_leverage), fatigued_count
 
 # ─── V4.2 Core Logic Helpers ──────────────────────────────────────────────────
 def get_top_4_xwoba(lineup_sc):
@@ -248,6 +235,20 @@ def get_todays_games():
             away_id, home_id = game['teams']['away']['team']['id'], game['teams']['home']['team']['id']
             status = game.get('status', {})
             abstract_state = status.get('abstractGameState', '')
+            detailed_state = status.get('detailedState', '')
+            away_score = game['teams']['away'].get('score')
+            home_score = game['teams']['home'].get('score')
+            
+            inning_info = ''
+            if abstract_state == 'Live':
+                ls = game.get('linescore', {})
+                inning_info = f"{ls.get('inningHalf', '')} {ls.get('currentInningOrdinal', '')}"
+            
+            game_time_pt = ''
+            if game.get('gameDate'):
+                try: game_time_pt = datetime.strptime(game['gameDate'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=pytz.utc).astimezone(pacific).strftime('%-I:%M %p PT')
+                except: pass
+
             away_p = game['teams']['away'].get('probablePitcher', {}).get('fullName', 'TBD')
             home_p = game['teams']['home'].get('probablePitcher', {}).get('fullName', 'TBD')
             
@@ -286,36 +287,99 @@ def get_todays_games():
 
                     req_away, req_home = evaluate_buzzsaw(get_top_4_xwoba(home_lineup_sc)), evaluate_buzzsaw(get_top_4_xwoba(away_lineup_sc))
                     
+                    max_adv = max(away_adv, home_adv)
+                    raw_lean_team = away_team if away_adv > home_adv else home_team if home_adv > away_adv else "Tie"
+
                     if away_adv >= req_away: v3_pick, v3_color, v3_reason = f"🟢 V4.2 PLAY {away_team} ML", "#00ff88", f"+{away_adv:.2f} Adjusted Edge"
                     elif home_adv >= req_home: v3_pick, v3_color, v3_reason = f"🟢 V4.2 PLAY {home_team} ML", "#00ff88", f"+{home_adv:.2f} Adjusted Edge"
                     elif away_adv >= 0.40: v3_pick, v3_color, v3_reason = f"🟡 V4.2 LEAN {away_team} +1.5", "#ffd700", f"+{away_adv:.2f} Adjusted Edge"
                     elif home_adv >= 0.40: v3_pick, v3_color, v3_reason = f"🟡 V4.2 LEAN {home_team} +1.5", "#ffd700", f"+{home_adv:.2f} Adjusted Edge"
-                    else: v3_pick, v3_color, v3_reason = f"🛑 SKIP", "#ff6b6b", "Metrics dead even"
+                    else: 
+                        v3_color = "#ff6b6b"
+                        if max_adv > 0:
+                            v3_pick = f"🛑 SKIP ({raw_lean_team})"
+                            v3_reason = f"Margin too thin (+{max_adv:.2f} edge max)"
+                        else:
+                            v3_pick = "🛑 SKIP"
+                            v3_reason = "Metrics dead even"
 
             _game_states[game_id] = {'state': abstract_state, 'lineups_hash': hash(tuple(away_lineup+home_lineup)), 'v3_data': {'pick': v3_pick, 'color': v3_color, 'reason': v3_reason}}
 
+            def get_weather(home_team):
+                if home_team in INDOOR_TEAMS: return {'label': 'Dome', 'relevant': False}
+                city = TEAM_CITIES.get(home_team)
+                if not city: return None
+                try:
+                    r = requests.get(f"https://wttr.in/{city}?format=j1", timeout=5).json()
+                    c = r['current_condition'][0]
+                    return {'label': c['weatherDesc'][0]['value'], 'temp': f"{c['temp_F']}°F", 'wind': f"{c['windspeedMiles']} mph {c['winddir16Point']}", 'relevant': True}
+                except: return None
+
             games.append({
-                'game_id': game_id, 'away_team': away_team, 'home_team': home_team, 'abstract_state': abstract_state,
-                'away_score': game['teams']['away'].get('score'), 'home_score': game['teams']['home'].get('score'),
+                'game_id': game_id, 'away_team': away_team, 'home_team': home_team, 'game_time': game_time_pt,
+                'abstract_state': abstract_state, 'detailed_state': detailed_state,
+                'away_score': away_score, 'home_score': home_score, 'inning_info': inning_info,
                 'away_pitcher': away_p, 'home_pitcher': home_p, 'away_p_stats': away_p_stats, 'home_p_stats': home_p_stats,
+                'away_lineup': away_lineup, 'home_lineup': home_lineup,
+                'away_lineup_sc': away_lineup_sc, 'home_lineup_sc': home_lineup_sc,
                 'a_bp_xera': a_bp_xera, 'a_bench': a_bench, 'a_rested': a_rested, 'a_tired': a_tired,
                 'h_bp_xera': h_bp_xera, 'h_bench': h_bench, 'h_rested': h_rested, 'h_tired': h_tired,
                 'lineup_confirmed': len(away_lineup) > 0 and len(home_lineup) > 0,
+                'weather': get_weather(home_team), 'park_factor': PARK_FACTORS.get(home_team, 100),
                 'v3_pick': v3_pick, 'v3_color': v3_color, 'v3_reason': v3_reason,
             })
     return games
 
-# ─── HTML Frontend ────────────────────────────────────────────────────────────
+# ─── HTML Frontend Helpers ────────────────────────────────────────────────────
 def stat_color(stat, value):
     try: v = float(str(value).replace('%', ''))
     except: return ''
-    if stat == 'xERA': return 'elite' if v<=3.0 else 'good' if v<=3.75 else 'avg' if v<=4.5 else 'bad'
-    if stat == 'xwOBA': return 'elite' if v>=0.350 else 'good' if v>=0.320 else 'avg' if v>=0.290 else 'bad'
-    return ''
+    rules = {
+        'ERA':      ([(3.0,'elite'),(3.75,'good'),(4.5,'avg')],      False),
+        'WHIP':     ([(1.1,'elite'),(1.25,'good'),(1.4,'avg')],      False),
+        'K%':       ([(28,'elite'),(23,'good'),(18,'avg')],          True),
+        'BB%':      ([(5,'elite'),(7,'good'),(9,'avg')],             False),
+        'HR/9':     ([(0.8,'elite'),(1.1,'good'),(1.4,'avg')],       False),
+        'xERA':     ([(3.0,'elite'),(3.75,'good'),(4.5,'avg')],      False),
+        'Whiff%':   ([(30,'elite'),(24,'good'),(18,'avg')],          True),
+        'xwOBA':    ([(0.290,'elite'),(0.320,'good'),(0.350,'avg')], False),
+        'HardHit%': ([(45,'elite'),(40,'good'),(35,'avg')],          True),
+        'Barrel%':  ([(10,'elite'),(7,'good'),(5,'avg')],            True),
+    }
+    if stat not in rules: return ''
+    thresholds, higher_is_better = rules[stat]
+    if higher_is_better:
+        for t, cls in thresholds:
+            if v >= t: return cls
+        return 'bad'
+    else:
+        for t, cls in thresholds:
+            if v <= t: return cls
+        return 'bad'
 
-def render_roster_metrics(name, bp_xera, bench, rested, tired):
-    return (f'<div style="margin-top:8px; padding:8px; background:#1e1e3a; border-radius:4px; font-size:0.85em; color:#ddd;">'
-            f'<div style="margin-bottom:6px"><b>{name} Late Innings:</b></div>'
+def render_pitcher_block(name, stats):
+    if not stats:
+        return (f'<div class="pitcher-block">'
+                f'<p class="pname">⚾ {name}</p>'
+                f'<p style="color:#888;font-size:0.8em">Stats unavailable</p>'
+                f'</div>')
+    base_keys = ['ERA', 'WHIP', 'K%', 'BB%', 'HR/9']
+    sc_keys   = ['xERA', 'Whiff%', 'HardHit%', 'Barrel%', 'xwOBA']
+    def stat_cell(k, v):
+        return (f'<div class="sc"><span class="sl">{k}</span>'
+                f'<span class="sv {stat_color(k, v)}">{v}</span></div>')
+    base_grid = ''.join(stat_cell(k, stats.get(k, 'N/A')) for k in base_keys)
+    sc_grid   = ''.join(stat_cell(k, stats.get(k, 'N/A')) for k in sc_keys)
+    return (f'<div class="pitcher-block">'
+            f'<p class="pname">⚾ {name} '
+            f'<span style="color:#888;font-size:0.75em">({stats.get("GS",0)} GS · {stats.get("IP",0)} IP)</span></p>'
+            f'<div class="sgrid">{base_grid}</div>'
+            f'<div class="sgrid" style="margin-top:4px">{sc_grid}</div>'
+            f'</div>')
+
+def render_roster_metrics(team_name, bp_xera, bench, tired):
+    return (f'<div class="roster-metrics">'
+            f'<div style="margin-bottom:6px; color:#aaa; font-size:0.85em;"><b>{team_name} Late Innings:</b></div>'
             f'<div style="display:flex; justify-content:space-between; margin-bottom:4px;">'
             f'<span>🔥 Available A-Bullpen xERA: <b class="{stat_color("xERA", bp_xera)}">{bp_xera}</b></span>'
             f'<span style="color:#ff6b6b; font-size:0.85em">({tired} Fatigued/Out)</span>'
@@ -323,38 +387,181 @@ def render_roster_metrics(name, bp_xera, bench, rested, tired):
             f'<div><span>🪵 Bench Pinch-Hit xwOBA: <b class="{stat_color("xwOBA", bench)}">{bench}</b></span></div>'
             f'</div>')
 
-def render_pitcher_block(name, stats):
-    if not stats: return f'<div class="pitcher-block"><p class="pname">⚾ {name}</p></div>'
-    return f'<div class="pitcher-block"><p class="pname">⚾ {name} ({stats["GS"]} GS)</p><div class="sgrid"><div class="sc"><span class="sl">xERA</span><span class="sv {stat_color("xERA", stats.get("xERA"))}">{stats.get("xERA","N/A")}</span></div></div></div>'
+def render_lineup_sc(lineup_sc, team_name):
+    if not lineup_sc: return ''
+    rows = ''
+    for p in lineup_sc:
+        sc = p.get('statcast', {})
+        if sc:
+            rows += (f'<tr><td>{p["name"]}</td>'
+                     f'<td class="{stat_color("xwOBA", sc.get("xwOBA","N/A"))}">{sc.get("xwOBA","—")}</td>'
+                     f'<td class="{stat_color("HardHit%", sc.get("HardHit%","N/A"))}">{sc.get("HardHit%","—")}</td>'
+                     f'<td class="{stat_color("Barrel%", sc.get("Barrel%","N/A"))}">{sc.get("Barrel%","—")}</td>'
+                     f'</tr>')
+        else:
+            rows += f'<tr><td>{p["name"]}</td><td>—</td><td>—</td><td>—</td></tr>'
+    return (f'<div class="sc-table-wrap">'
+            f'<p class="sc-title">📊 {team_name} Statcast</p>'
+            f'<table class="sc-table">'
+            f'<tr><th>Batter</th><th>xwOBA</th><th>HardHit%</th><th>Barrel%</th></tr>'
+            f'{rows}</table></div>')
+
+def render_score_banner(g):
+    state = g['abstract_state']
+    away, home = g['away_team'], g['home_team']
+    as_, hs = g.get('away_score'), g.get('home_score')
+
+    if state == 'Final':
+        if as_ is None or hs is None:
+            return f'<div class="score-banner final"><span class="score-teams">{away} — {home}</span><span class="score-label">FINAL</span></div>'
+        winner = away if as_ > hs else home
+        return f'<div class="score-banner final"><span class="score-teams">{away} <span class="score-num">{as_}</span> — <span class="score-num">{hs}</span> {home}</span><span class="score-label">FINAL · {winner} Win</span></div>'
+    elif state == 'Live':
+        as_disp, hs_disp = as_ if as_ is not None else 0, hs if hs is not None else 0
+        return f'<div class="score-banner live"><span class="score-teams">{away} <span class="score-num">{as_disp}</span> — <span class="score-num">{hs_disp}</span> {home}</span><span class="score-label">🔴 LIVE · {g["inning_info"]}</span></div>'
+    return ''
 
 def render_card(g):
-    b_cls = 'final-game' if g['abstract_state'] == 'Final' else 'live-game' if g['abstract_state'] == 'Live' else 'confirmed' if g['lineup_confirmed'] else 'pending'
+    state = g['abstract_state']
+    pf = g['park_factor']
+    border_cls = 'final-game' if state == 'Final' else 'live-game' if state == 'Live' else 'confirmed' if g['lineup_confirmed'] else 'pending'
+    
+    pf_label = '🔴 Hitter Friendly' if pf >= 105 else '🟢 Pitcher Friendly' if pf <= 95 else '⚪ Neutral'
+    pf_cls = 'hitter' if pf >= 105 else 'pitcher-park' if pf <= 95 else 'neutral'
+    
+    weather_html = ''
+    w = g.get('weather')
+    if w:
+        weather_html = f'<span class="badge wx">🌤️ {w["label"]} · {w["temp"]} · 💨 {w["wind"]}</span>' if w['relevant'] else '<span class="badge dome">🏟️ Dome</span>'
+                            
+    score_html = render_score_banner(g)
+    v3_banner = f'<div class="v3-banner" style="border-color:{g.get("v3_color", "#888")}"><span class="v3-pick" style="color:{g.get("v3_color", "#888")}">{g.get("v3_pick", "")}</span><span class="v3-reason">{g.get("v3_reason", "")}</span></div>'
+
+    pitchers_html = f'<div class="pr">{render_pitcher_block(g["away_pitcher"], g["away_p_stats"])}{render_pitcher_block(g["home_pitcher"], g["home_p_stats"])}</div>'
+    roster_html = f'<div class="pr"><div style="flex:1">{render_roster_metrics(g["away_team"], g["a_bp_xera"], g["a_bench"], g["a_tired"])}</div><div style="flex:1">{render_roster_metrics(g["home_team"], g["h_bp_xera"], g["h_bench"], g["h_tired"])}</div></div>'
+    
+    lineups_html = ''
+    if g['lineup_confirmed']:
+        away_sc_table = render_lineup_sc(g.get('away_lineup_sc', []), g['away_team'])
+        home_sc_table = render_lineup_sc(g.get('home_lineup_sc', []), g['home_team'])
+        away_li = ''.join(f'<li>{p}</li>' for p in g['away_lineup'])
+        home_li = ''.join(f'<li>{p}</li>' for p in g['home_lineup'])
+        lineups_html = (
+            f'<details class="lu"><summary>📋 View Lineups + Statcast</summary>'
+            f'<div class="lu-row"><div><b>{g["away_team"]}</b><ol>{away_li}</ol></div><div><b>{g["home_team"]}</b><ol>{home_li}</ol></div></div>'
+            f'<div class="sc-tables-row">{away_sc_table}{home_sc_table}</div>'
+            f'</details>'
+        )
+    elif state not in ('Final', 'Live'):
+        lineups_html = '<p style="color:#ff6b6b;font-size:0.82em;margin-top:10px;">⏳ Lineup not yet confirmed</p>'
+        
+    header_right = '<span class="gt" style="color:#888">FINAL</span>' if state == 'Final' else f'<span class="gt" style="color:#ff4444">🔴 LIVE · {g["inning_info"]}</span>' if state == 'Live' else f'<span class="gt">🕐 {g["game_time"]}</span>'
+        
     return f'''
-    <div class="game {b_cls}">
-      <div class="gh"><h3>{g["away_team"]} @ {g["home_team"]}</h3></div>
-      <div class="v3-banner" style="border-color:{g.get('v3_color', '#888')}">
-        <span class="v3-pick" style="color:{g.get('v3_color', '#888')}">{g.get('v3_pick', '')}</span>
-        <span class="v3-reason">{g.get('v3_reason', '')}</span>
-      </div>
-      <div class="pr">
-        {render_pitcher_block(g["away_pitcher"], g["away_p_stats"])}
-        {render_pitcher_block(g["home_pitcher"], g["home_p_stats"])}
-      </div>
-      <div class="pr">
-        <div style="flex:1">{render_roster_metrics(g["away_team"], g["a_bp_xera"], g["a_bench"], g["a_rested"], g["a_tired"])}</div>
-        <div style="flex:1">{render_roster_metrics(g["home_team"], g["h_bp_xera"], g["h_bench"], g["h_rested"], g["h_tired"])}</div>
-      </div>
+    <div class="game {border_cls}">
+      <div class="gh"><h3>{g["away_team"]} @ {g["home_team"]}</h3>{header_right}</div>
+      {score_html}
+      {v3_banner}
+      <div class="badges"><span class="badge {pf_cls}">🏠 PF {pf} · {pf_label}</span>{weather_html}</div>
+      {pitchers_html}
+      {roster_html}
+      {lineups_html}
     </div>'''
 
+# ─── Routes ───────────────────────────────────────────────────────────────────
 @app.route('/')
 def index():
-    games = cached('games_list', get_todays_games)
-    css = "*{box-sizing:border-box} body{font-family:Arial,sans-serif;background:#1a1a2e;color:#eee;padding:16px;max-width:1100px;margin:auto} h1{color:#ffd700} .game{background:#16213e;border:1px solid #0f3460;padding:14px;margin:10px 0;border-radius:10px} .confirmed{border-left:4px solid #00ff88} .pending{border-left:4px solid #ff6b6b} .live-game{border-left:4px solid #ff4444} .final-game{border-left:4px solid #444} .v3-banner{background:#0a0f1a;border:1px solid;padding:10px;margin-bottom:12px;border-radius:6px;display:flex;justify-content:space-between} .pr{display:flex;gap:12px} .pitcher-block{flex:1;background:#0f1929;padding:10px;border-radius:8px} .sgrid{display:grid;grid-template-columns:repeat(5,1fr);gap:4px} .sc{background:#1a2540;padding:4px;text-align:center} .sl{font-size:0.6em;color:#888;display:block} .sv{font-size:0.85em;font-weight:bold} .elite{color:#00ff88} .bad{color:#ff6b6b}"
-    return f"<!DOCTYPE html><html><head><style>{css}</style></head><body><h1>⚾ MLB V4.2 Fatigue Engine</h1>" + ''.join(render_card(g) for g in games) + "</body></html>"
+    pacific = pytz.timezone('America/Los_Angeles')
+    now_pt  = datetime.now(pacific)
+    games   = cached('games_list', get_todays_games)
+    
+    live      = [g for g in games if g['abstract_state'] == 'Live']
+    confirmed = [g for g in games if g['abstract_state'] == 'Preview' and g['lineup_confirmed']]
+    pending   = [g for g in games if g['abstract_state'] == 'Preview' and not g['lineup_confirmed']]
+    final     = [g for g in games if g['abstract_state'] == 'Final']
+    
+    css = """
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:Arial,sans-serif;background:#1a1a2e;color:#eee;padding:16px;max-width:1100px;margin:auto}
+    h1{color:#ffd700;font-size:1.5em;margin-bottom:4px}
+    h2{font-size:1.1em;margin:16px 0 8px}
+    h3{color:#eee;font-size:1em}
+    .sub{color:#888;font-size:0.82em;margin-bottom:16px}
+    .game{background:#16213e;border:1px solid #0f3460;padding:14px;margin:10px 0;border-radius:10px}
+    .confirmed{border-left:4px solid #00ff88}
+    .pending{border-left:4px solid #ff6b6b}
+    .live-game{border-left:4px solid #ff4444;background:#1e1020}
+    .final-game{border-left:4px solid #444;opacity:0.75}
+    .gh{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+    .gt{color:#aaa;font-size:0.82em}
+    .score-banner{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-radius:6px;margin-bottom:10px;font-size:0.9em}
+    .score-banner.final{background:#1a1a1a;color:#aaa}
+    .score-banner.live{background:#2a0a0a;color:#ff8888}
+    .score-num{font-size:1.3em;font-weight:bold;color:#ffd700}
+    .score-label{font-size:0.78em;color:#888}
+    .score-banner.live .score-label{color:#ff6666}
+    .v3-banner{background:#0a0f1a;border:1px solid;padding:10px 14px;margin-bottom:12px;border-radius:6px;display:flex;justify-content:space-between;align-items:center}
+    .v3-pick{font-weight:bold;font-size:1.05em;letter-spacing:0.5px}
+    .v3-reason{color:#aaa;font-size:0.85em;text-align:right}
+    .badges{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
+    .badge{font-size:0.73em;padding:3px 8px;border-radius:12px}
+    .hitter{background:#3d1515;color:#ff6b6b}
+    .pitcher-park{background:#0d2e1a;color:#00ff88}
+    .neutral{background:#1e1e3a;color:#aaa}
+    .wx{background:#1a2a3a;color:#7ec8e3}
+    .dome{background:#2a2a2a;color:#888}
+    .pr{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:10px}
+    .pitcher-block{flex:1;min-width:220px;background:#0f1929;border-radius:8px;padding:10px}
+    .roster-metrics{margin-top:8px; padding:10px; background:#1e1e3a; border-radius:6px; font-size:0.9em; color:#ddd; border-left:3px solid #7ec8e3;}
+    .pname{color:#ffd700;font-size:0.88em;margin-bottom:8px}
+    .sgrid{display:grid;grid-template-columns:repeat(5,1fr);gap:4px}
+    .sc{background:#1a2540;border-radius:4px;padding:4px 6px;text-align:center}
+    .sl{display:block;font-size:0.62em;color:#888}
+    .sv{display:block;font-size:0.88em;font-weight:bold}
+    .elite{color:#00ff88}.good{color:#88ff44}.avg{color:#ffd700}.bad{color:#ff6b6b}
+    .lu{margin-top:12px; background:#0f1929; padding:8px 12px; border-radius:6px;}
+    .lu summary{cursor:pointer;color:#aaa;font-size:0.85em;padding:4px 0; font-weight:bold;}
+    .lu summary:hover{color:#fff;}
+    .lu-row{display:flex;gap:16px;flex-wrap:wrap;margin-top:10px;font-size:0.82em;color:#ccc}
+    .lu-row ol{padding-left:22px;margin-top:6px}
+    .lu-row li{margin:3px 0}
+    .sc-tables-row{display:flex;gap:16px;flex-wrap:wrap;margin-top:16px}
+    .sc-table-wrap{flex:1;min-width:240px}
+    .sc-title{color:#7ec8e3;font-size:0.85em;margin-bottom:8px; font-weight:bold;}
+    .sc-table{width:100%;border-collapse:collapse;font-size:0.78em}
+    .sc-table th{color:#888;text-align:left;padding:4px 6px;border-bottom:1px solid #1a2540}
+    .sc-table td{padding:4px 6px;border-bottom:1px solid #1a2540}
+    .sc-table tr:hover td{background:#1a2540}
+    """
+    def section(title, color, items):
+        if not items: return ''
+        return f'<h2 style="color:{color}">{title} ({len(items)} games)</h2>' + ''.join(render_card(g) for g in items)
+        
+    html = f"""<!DOCTYPE html><html>
+    <head>
+      <title>MLB V4.2 Dashboard</title>
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      <style>{css}</style>
+    </head>
+    <body>
+      <h1>⚾ MLB V4.2 Fatigue Engine & Dashboard</h1>
+      <p class="sub">Last updated: {now_pt.strftime('%I:%M %p PT')} · {now_pt.strftime('%b %d, %Y')}</p>
+      {section('🔴 Live Now', '#ff4444', live)}
+      {section('✅ Lineups Confirmed', '#00ff88', confirmed)}
+      {section('⏳ Lineups Pending', '#ff6b6b', pending)}
+      {section('☑️ Completed', '#555', final)}
+    </body></html>"""
+    return html
 
 @app.route('/api/games')
-def api_games(): return jsonify(cached('games_list', get_todays_games))
+def api_games():
+    return jsonify(cached('games_list', get_todays_games))
 
-if __name__ == '__main__': app.run(debug=True)
+@app.route('/robots.txt')
+def robots():
+    return "User-agent: *\nAllow: /", 200, {'Content-Type': 'text/plain'}
+
+if __name__ == '__main__':
+    app.run(debug=True)
 
 
