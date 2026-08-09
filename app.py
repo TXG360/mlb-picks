@@ -17,6 +17,8 @@ _cache = {}
 CACHE_TTL = 3600
 _game_states = {} 
 
+CURRENT_YEAR = datetime.now().year
+
 def cached(key, fn, ttl=CACHE_TTL):
     now = datetime.utcnow().timestamp()
     if key in _cache and now - _cache[key]['ts'] < ttl:
@@ -50,16 +52,33 @@ TEAM_CITIES = {
     'San Diego Padres': 'San+Diego+CA', 'Oakland Athletics': 'Sacramento+CA',
 }
 
-# ─── Fuzzy Name Lookup ────────────────────────────────────────────────────────
+# ─── Fuzzy Name Lookup (PATCHED V4.3) ─────────────────────────────────────────
 def fuzzy_lookup(name, data_dict):
     if not data_dict or not name: return None
-    if name in data_dict: return data_dict[name]
+    name_clean = name.lower().strip()
+    
+    # 1. Exact Match Priority
+    for key in data_dict:
+        if key.lower().strip() == name_clean:
+            return data_dict[key]
+            
     parts = name.split()
     if not parts: return None
-    last = parts[-1].lower()
+    
+    # 2. First Initial + Last Name Match (Prevents "Suarez" collision)
+    first_init = parts[0][0].lower()
+    last_name = parts[-1].lower()
     for key in data_dict:
-        if key.split() and key.split()[-1].lower() == last:
+        k_parts = key.split()
+        if len(k_parts) > 1:
+            if k_parts[0][0].lower() == first_init and k_parts[-1].lower() == last_name:
+                return data_dict[key]
+                
+    # 3. Fallback: Last Name Only
+    for key in data_dict:
+        if key.split() and key.split()[-1].lower() == last_name:
             return data_dict[key]
+            
     return None
 
 def clean(val): return str(val).strip().strip('"').strip("'").strip()
@@ -68,7 +87,7 @@ def clean(val): return str(val).strip().strip('"').strip("'").strip()
 def get_statcast_batter_data():
     def fetch():
         try:
-            url = "https://baseballsavant.mlb.com/leaderboard/custom?year=2026&type=batter&filter=&sort=4&sortDir=desc&min=10&selections=xba,xslg,xwoba,hard_hit_percent,barrel_batted_rate&csv=true"
+            url = f"https://baseballsavant.mlb.com/leaderboard/custom?year={CURRENT_YEAR}&type=batter&filter=&sort=4&sortDir=desc&min=10&selections=xba,xslg,xwoba,hard_hit_percent,barrel_batted_rate&csv=true"
             r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
             if r.status_code != 200: return {}
             reader = csv.DictReader(io.StringIO(r.text.lstrip('\ufeff')))
@@ -92,7 +111,7 @@ def get_statcast_batter_data():
 def get_statcast_pitcher_data():
     def fetch():
         try:
-            url = "https://baseballsavant.mlb.com/leaderboard/custom?year=2026&type=pitcher&filter=&sort=4&sortDir=desc&min=10&selections=xera,xwoba,hard_hit_percent,barrel_batted_rate,whiff_percent&csv=true"
+            url = f"https://baseballsavant.mlb.com/leaderboard/custom?year={CURRENT_YEAR}&type=pitcher&filter=&sort=4&sortDir=desc&min=10&selections=xera,xwoba,hard_hit_percent,barrel_batted_rate,whiff_percent&csv=true"
             r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
             if r.status_code != 200: return {}
             reader = csv.DictReader(io.StringIO(r.text.lstrip('\ufeff')))
@@ -118,7 +137,7 @@ def get_pitcher_stats_mlb(player_id, pitcher_name, sc_data):
     if not player_id: return None
     def fetch():
         try:
-            url = f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats?stats=season&group=pitching&season=2026"
+            url = f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats?stats=season&group=pitching&season={CURRENT_YEAR}"
             data = requests.get(url, timeout=5).json()
             s = data.get('stats', [{}])[0].get('splits', [])[0]['stat']
             ip, gs, bf = float(s.get('inningsPitched', 0)), int(s.get('gamesStarted', 0)), int(s.get('battersFaced', 1))
@@ -163,7 +182,7 @@ def get_league_fatigue():
 
 def get_full_roster_metrics(team_id, starter_name, lineup_names, pitcher_sc, batter_sc):
     def fetch():
-        try: return requests.get(f"https://statsapi.mlb.com/api/v1/teams/{team_id}/roster/Active?season=2026", timeout=5).json()
+        try: return requests.get(f"https://statsapi.mlb.com/api/v1/teams/{team_id}/roster/Active?season={CURRENT_YEAR}", timeout=5).json()
         except: return {}
         
     roster = cached(f'roster_{team_id}', fetch).get('roster', [])
@@ -263,11 +282,18 @@ def get_todays_games():
                 try: game_time_pt = datetime.strptime(game['gameDate'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=pytz.utc).astimezone(pacific).strftime('%-I:%M %p PT')
                 except: pass
 
-            away_p = game['teams']['away'].get('probablePitcher', {}).get('fullName', 'TBD')
-            home_p = game['teams']['home'].get('probablePitcher', {}).get('fullName', 'TBD')
+            # PATCH V4.3: Secure Pitcher Target Parsing
+            game_probs = game.get('probablePitchers', {})
+            away_pitcher_obj = game_probs.get('away') or game['teams']['away'].get('probablePitcher', {})
+            home_pitcher_obj = game_probs.get('home') or game['teams']['home'].get('probablePitcher', {})
             
-            away_p_stats = get_pitcher_stats_mlb(game['teams']['away'].get('probablePitcher', {}).get('id'), away_p, pitcher_sc)
-            home_p_stats = get_pitcher_stats_mlb(game['teams']['home'].get('probablePitcher', {}).get('id'), home_p, pitcher_sc)
+            away_p = away_pitcher_obj.get('fullName', 'TBD')
+            home_p = home_pitcher_obj.get('fullName', 'TBD')
+            away_p_id = away_pitcher_obj.get('id')
+            home_p_id = home_pitcher_obj.get('id')
+            
+            away_p_stats = get_pitcher_stats_mlb(away_p_id, away_p, pitcher_sc)
+            home_p_stats = get_pitcher_stats_mlb(home_p_id, home_p, pitcher_sc)
             
             away_lineup, home_lineup, away_lineup_sc, home_lineup_sc = [], [], [], []
             if 'lineups' in game:
@@ -280,7 +306,6 @@ def get_todays_games():
                         home_lineup.append(p['fullName'])
                         home_lineup_sc.append({'name': p['fullName'], 'statcast': fuzzy_lookup(p['fullName'], batter_sc) or {}})
 
-            # Fetch V4.2 Metrics
             a_bp_xera, a_bench, a_rested, a_tired = get_full_roster_metrics(away_id, away_p, away_lineup, pitcher_sc, batter_sc)
             h_bp_xera, h_bench, h_rested, h_tired = get_full_roster_metrics(home_id, home_p, home_lineup, pitcher_sc, batter_sc)
 
@@ -512,6 +537,6 @@ def api_games():
     return jsonify(cached('games_list', get_todays_games))
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(host='0.0.0.0', port=10000, debug=False)
 
 
