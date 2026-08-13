@@ -8,9 +8,13 @@ import logging
 
 app = Flask(__name__)
 
-# Configure logging for the settlement/gate logic
+# Configure logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
+
+# ─── API KEYS & CONFIG ────────────────────────────────────────────────────────
+# Your new API key from theoddsapi.com
+ODDS_API_KEY = "toa_live_3ofpyj5mayimyz5t"
 
 # ─── Cache & Global State ─────────────────────────────────────────────────────
 _cache = {}
@@ -52,33 +56,74 @@ TEAM_CITIES = {
     'San Diego Padres': 'San+Diego+CA', 'Oakland Athletics': 'Sacramento+CA',
 }
 
-# ─── Fuzzy Name Lookup (PATCHED V4.3) ─────────────────────────────────────────
+# ─── LIVE ODDS ENGINE (V4.6.1 User Custom API) ────────────────────────────────
+def normalize_team_name(name):
+    """Matches odds API team names (like 'LA Dodgers') to MLB API names."""
+    if not name: return name
+    for full_name in PARK_FACTORS.keys():
+        if name.lower() == full_name.lower():
+            return full_name
+        # Match by Mascot (e.g. "Dodgers")
+        if name.split()[-1].lower() == full_name.split()[-1].lower():
+            if "Sox" in name: # Handle Red Sox / White Sox collision
+                if "White" in name and "White" in full_name: return full_name
+                if "Red" in name and "Red" in full_name: return full_name
+            else:
+                return full_name
+    return name
+
+def get_live_odds():
+    def fetch():
+        try:
+            url = "https://api.theoddsapi.com/odds/?sport_key=baseball_mlb"
+            headers = {"x-api-key": ODDS_API_KEY}
+            r = requests.get(url, headers=headers, timeout=10)
+            data = r.json()
+            odds_map = {}
+            
+            # The API likely returns a list of games in the 'data' node or as the root
+            games = data if isinstance(data, list) else data.get('data', [])
+            
+            for game in games:
+                bookmakers = game.get('bookmakers', [])
+                if not bookmakers: continue
+                
+                # Prefer DraftKings, otherwise take the first book available
+                book = next((b for b in bookmakers if b.get('key') == 'draftkings'), bookmakers[0])
+                markets = book.get('markets', [])
+                if not markets: continue
+                
+                # h2h is standard for Moneyline
+                h2h = next((m for m in markets if m.get('key') == 'h2h'), markets[0])
+                outcomes = h2h.get('outcomes', [])
+                
+                for outcome in outcomes:
+                    raw_team_name = outcome.get('name')
+                    price = outcome.get('price')
+                    if raw_team_name and price is not None:
+                        normalized_name = normalize_team_name(raw_team_name)
+                        odds_map[normalized_name] = price
+                        
+            return odds_map
+        except Exception as e:
+            logger.error(f"Live Odds API Failed: {e}")
+            return {}
+    return cached('live_odds', fetch, ttl=1800) # Cache for 30 minutes to save API quota
+
+# ─── Fuzzy Name Lookup ─────────────────────────────────────────
 def fuzzy_lookup(name, data_dict):
     if not data_dict or not name: return None
     name_clean = name.lower().strip()
-    
-    # 1. Exact Match Priority
     for key in data_dict:
-        if key.lower().strip() == name_clean:
-            return data_dict[key]
-            
+        if key.lower().strip() == name_clean: return data_dict[key]
     parts = name.split()
     if not parts: return None
-    
-    # 2. First Initial + Last Name Match (Prevents "Suarez" collision)
-    first_init = parts[0][0].lower()
-    last_name = parts[-1].lower()
+    first_init, last_name = parts[0][0].lower(), parts[-1].lower()
     for key in data_dict:
         k_parts = key.split()
-        if len(k_parts) > 1:
-            if k_parts[0][0].lower() == first_init and k_parts[-1].lower() == last_name:
-                return data_dict[key]
-                
-    # 3. Fallback: Last Name Only
+        if len(k_parts) > 1 and k_parts[0][0].lower() == first_init and k_parts[-1].lower() == last_name: return data_dict[key]
     for key in data_dict:
-        if key.split() and key.split()[-1].lower() == last_name:
-            return data_dict[key]
-            
+        if key.split() and key.split()[-1].lower() == last_name: return data_dict[key]
     return None
 
 def clean(val): return str(val).strip().strip('"').strip("'").strip()
@@ -97,12 +142,11 @@ def get_statcast_batter_data():
                 if ',' not in raw_name: continue
                 last, first = raw_name.split(',', 1)
                 name = f"{first.strip()} {last.strip()}"
-                hh = clean(row.get('hard_hit_percent', ''))
-                bar = clean(row.get('barrel_batted_rate', ''))
                 lookup[name] = {
                     'xwOBA': clean(row.get('xwoba', 'N/A')), 'xBA': clean(row.get('xba', 'N/A')),
                     'xSLG': clean(row.get('xslg', 'N/A')),
-                    'HardHit%': f"{hh}%" if hh else "N/A", 'Barrel%': f"{bar}%" if bar else "N/A"
+                    'HardHit%': f"{clean(row.get('hard_hit_percent', ''))}%", 
+                    'Barrel%': f"{clean(row.get('barrel_batted_rate', ''))}%"
                 }
             return lookup
         except: return {}
@@ -121,13 +165,11 @@ def get_statcast_pitcher_data():
                 if ',' not in raw_name: continue
                 last, first = raw_name.split(',', 1)
                 name = f"{first.strip()} {last.strip()}"
-                hh = clean(row.get('hard_hit_percent', ''))
-                bar = clean(row.get('barrel_batted_rate', ''))
-                whiff = clean(row.get('whiff_percent', ''))
                 lookup[name] = {
                     'xERA': clean(row.get('xera', 'N/A')), 'xwOBA': clean(row.get('xwoba', 'N/A')),
-                    'Whiff%': f"{whiff}%" if whiff else "N/A",
-                    'HardHit%': f"{hh}%" if hh else "N/A", 'Barrel%': f"{bar}%" if bar else "N/A"
+                    'Whiff%': f"{clean(row.get('whiff_percent', ''))}%",
+                    'HardHit%': f"{clean(row.get('hard_hit_percent', ''))}%", 
+                    'Barrel%': f"{clean(row.get('barrel_batted_rate', ''))}%"
                 }
             return lookup
         except: return {}
@@ -153,7 +195,7 @@ def get_pitcher_stats_mlb(player_id, pitcher_name, sc_data):
         except: return None
     return cached(f'pitcher_{player_id}', fetch)
 
-# ─── V4.2 Fatigue Engine & Roster Metrics ─────────────────────────────────────
+# ─── V4.5 Fatigue Engine & Roster Metrics ─────────────────────────────────────
 def get_league_fatigue():
     def fetch():
         try:
@@ -216,19 +258,22 @@ def get_full_roster_metrics(team_id, starter_name, lineup_names, pitcher_sc, bat
                 
     bp_xeras.sort()
     high_leverage = bp_xeras[:4] if len(bp_xeras) >= 4 else bp_xeras
-    
     bp_xera = round(sum(high_leverage)/len(high_leverage), 2) if high_leverage else 4.20
     bench_xwoba = round(sum(bench_xwobas)/len(bench_xwobas), 3) if bench_xwobas else 0.300
     
     return bp_xera, bench_xwoba, len(high_leverage), fatigued_count
 
-# ─── Core Logic Helpers ───────────────────────────────────────────────────────
+# ─── Core Logic Helpers (V4.5 Sniper Mode) ─────────────────────────
 def get_top_4_xwoba(lineup_sc):
     if not lineup_sc or len(lineup_sc) < 4: return 0.0
-    vals = [float(p['statcast']['xwOBA']) for p in lineup_sc[:4] if p.get('statcast', {}).get('xwOBA') not in ('N/A', '-', '', None)]
+    vals = []
+    for p in lineup_sc[:4]:
+        val = p.get('statcast', {}).get('xwOBA')
+        if val in ('N/A', '-', '', None): return 0.0 # Rule 0 Enforcement
+        vals.append(float(val))
     return sum(vals) / len(vals) if vals else 0.0
 
-def evaluate_buzzsaw(opp_top_4_xwoba, base_required_delta=0.75):
+def evaluate_buzzsaw(opp_top_4_xwoba, base_required_delta=0.75): 
     if opp_top_4_xwoba >= 0.365: return 1.60
     elif opp_top_4_xwoba >= 0.350: return 1.15
     return base_required_delta
@@ -240,8 +285,7 @@ def blended_pitching_metric_v4(starter_xera, bullpen_xera):
 
 # ─── Weather ──────────────────────────────────────────────────────────────────
 def get_weather(home_team):
-    if home_team in INDOOR_TEAMS:
-        return {'label': 'Dome', 'relevant': False}
+    if home_team in INDOOR_TEAMS: return {'label': 'Dome', 'relevant': False}
     city = TEAM_CITIES.get(home_team)
     if not city: return None
     try:
@@ -259,12 +303,16 @@ def get_todays_games():
     data = requests.get(url).json()
     batter_sc = get_statcast_batter_data()
     pitcher_sc = get_statcast_pitcher_data()
+    live_odds = get_live_odds() # Fetch TheOddsAPI Odds
     games = []
     
     for date_entry in data.get('dates', []):
         for game in date_entry.get('games', []):
             away_team, home_team = game['teams']['away']['team']['name'], game['teams']['home']['team']['name']
             away_id, home_id = game['teams']['away']['team']['id'], game['teams']['home']['team']['id']
+            
+            away_odds = live_odds.get(away_team, 'N/A')
+            home_odds = live_odds.get(home_team, 'N/A')
             
             status = game.get('status', {})
             abstract_state = status.get('abstractGameState', '')
@@ -282,7 +330,6 @@ def get_todays_games():
                 try: game_time_pt = datetime.strptime(game['gameDate'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=pytz.utc).astimezone(pacific).strftime('%-I:%M %p PT')
                 except: pass
 
-            # PATCH V4.3: Secure Pitcher Target Parsing
             game_probs = game.get('probablePitchers', {})
             away_pitcher_obj = game_probs.get('away') or game['teams']['away'].get('probablePitcher', {})
             home_pitcher_obj = game_probs.get('home') or game['teams']['home'].get('probablePitcher', {})
@@ -296,51 +343,76 @@ def get_todays_games():
             home_p_stats = get_pitcher_stats_mlb(home_p_id, home_p, pitcher_sc)
             
             away_lineup, home_lineup, away_lineup_sc, home_lineup_sc = [], [], [], []
+            has_missing_data = False
+            
             if 'lineups' in game:
                 for p in game['lineups'].get('awayPlayers', []):
                     if p.get('fullName'):
                         away_lineup.append(p['fullName'])
-                        away_lineup_sc.append({'name': p['fullName'], 'statcast': fuzzy_lookup(p['fullName'], batter_sc) or {}})
+                        sc_data = fuzzy_lookup(p['fullName'], batter_sc) or {}
+                        if not sc_data: has_missing_data = True
+                        away_lineup_sc.append({'name': p['fullName'], 'statcast': sc_data})
+                        
                 for p in game['lineups'].get('homePlayers', []):
                     if p.get('fullName'):
                         home_lineup.append(p['fullName'])
-                        home_lineup_sc.append({'name': p['fullName'], 'statcast': fuzzy_lookup(p['fullName'], batter_sc) or {}})
+                        sc_data = fuzzy_lookup(p['fullName'], batter_sc) or {}
+                        if not sc_data: has_missing_data = True
+                        home_lineup_sc.append({'name': p['fullName'], 'statcast': sc_data})
 
             a_bp_xera, a_bench, a_rested, a_tired = get_full_roster_metrics(away_id, away_p, away_lineup, pitcher_sc, batter_sc)
             h_bp_xera, h_bench, h_rested, h_tired = get_full_roster_metrics(home_id, home_p, home_lineup, pitcher_sc, batter_sc)
 
             game_id = game['gamePk']
             cached_state = _game_states.get(game_id)
-            v3_pick, v3_color, v3_reason = "Awaiting Lineups/Pitchers", "#888", "Missing statcast data for calculation"
+            v3_pick, v3_color, v3_reason = "Awaiting Lineups/Pitchers", "#888", "Missing pitcher/statcast data"
 
             if cached_state and (abstract_state in ['Live', 'Final'] or (abstract_state == 'Preview' and hash(tuple(away_lineup+home_lineup)) == cached_state['lineups_hash'])):
                 v3_pick, v3_color, v3_reason = cached_state['v3_data'].values()
             else:
-                a_blended = blended_pitching_metric_v4(away_p_stats.get('xERA') if away_p_stats else None, a_bp_xera)
-                h_blended = blended_pitching_metric_v4(home_p_stats.get('xERA') if home_p_stats else None, h_bp_xera)
+                if has_missing_data:
+                    v3_color = "#888"
+                    v3_pick = "🛑 SKIP (Missing Data)"
+                    v3_reason = "Incomplete statcast profiles in confirmed lineup."
+                else:
+                    a_blended = blended_pitching_metric_v4(away_p_stats.get('xERA') if away_p_stats else None, a_bp_xera)
+                    h_blended = blended_pitching_metric_v4(home_p_stats.get('xERA') if home_p_stats else None, h_bp_xera)
 
-                if a_blended and h_blended and len(away_lineup) >= 4 and len(home_lineup) >= 4:
-                    away_adv, home_adv = h_blended - a_blended, a_blended - h_blended
-                    if a_bench < 0.280: away_adv -= 0.15 
-                    if h_bench < 0.280: home_adv -= 0.15
+                    if a_blended and h_blended and len(away_lineup) >= 4 and len(home_lineup) >= 4:
+                        away_adv, home_adv = h_blended - a_blended, a_blended - h_blended
+                        if a_bench < 0.280: away_adv -= 0.15 
+                        if h_bench < 0.280: home_adv -= 0.15
 
-                    req_away, req_home = evaluate_buzzsaw(get_top_4_xwoba(home_lineup_sc)), evaluate_buzzsaw(get_top_4_xwoba(away_lineup_sc))
-                    max_adv = max(away_adv, home_adv)
-                    raw_lean_team = away_team if away_adv > home_adv else home_team if home_adv > away_adv else "Tie"
+                        req_away, req_home = evaluate_buzzsaw(get_top_4_xwoba(home_lineup_sc)), evaluate_buzzsaw(get_top_4_xwoba(away_lineup_sc))
+                        max_adv = max(away_adv, home_adv)
+                        raw_lean_team = away_team if away_adv > home_adv else home_team if home_adv > away_adv else "Tie"
 
-                    if away_adv >= req_away: v3_pick, v3_color, v3_reason = f"🟢 V4.2 PLAY {away_team} ML", "#00ff88", f"+{away_adv:.2f} Adjusted Edge"
-                    elif home_adv >= req_home: v3_pick, v3_color, v3_reason = f"🟢 V4.2 PLAY {home_team} ML", "#00ff88", f"+{home_adv:.2f} Adjusted Edge"
-                    elif away_adv >= 0.40: v3_pick, v3_color, v3_reason = f"🟡 V4.2 LEAN {away_team} +1.5", "#ffd700", f"+{away_adv:.2f} Adjusted Edge"
-                    elif home_adv >= 0.40: v3_pick, v3_color, v3_reason = f"🟡 V4.2 LEAN {home_team} +1.5", "#ffd700", f"+{home_adv:.2f} Adjusted Edge"
-                    else: 
-                        v3_color = "#ff6b6b"
-                        if max_adv > 0: v3_pick, v3_reason = f"🛑 SKIP ({raw_lean_team})", f"Margin too thin (+{max_adv:.2f} edge max)"
-                        else: v3_pick, v3_reason = "🛑 SKIP", "Metrics dead even"
+                        if away_adv >= req_away: 
+                            v3_pick, v3_color, v3_reason = f"🟢 V4.6 PLAY {away_team} ML", "#00ff88", f"+{away_adv:.2f} Adjusted Edge"
+                        elif home_adv >= req_home: 
+                            v3_pick, v3_color, v3_reason = f"🟢 V4.6 PLAY {home_team} ML", "#00ff88", f"+{home_adv:.2f} Adjusted Edge"
+                        else: 
+                            v3_color = "#ff6b6b"
+                            if max_adv > 0: v3_pick, v3_reason = f"🛑 SKIP ({raw_lean_team})", f"Margin too thin (+{max_adv:.2f} edge max)"
+                            else: v3_pick, v3_reason = "🛑 SKIP", "Metrics dead even"
+
+                        # 🚨 THE V4.6 AUTO-ODDS PRICE FILTER
+                        if "PLAY" in v3_pick:
+                            target_odds = away_odds if away_team in v3_pick else home_odds
+                            if isinstance(target_odds, int) and target_odds < -150: # Negative American odds: -160 is less than -150
+                                v3_pick = f"🛑 SKIP (Price Filter)"
+                                v3_reason = f"Odds ({target_odds}) violate -150 Max Price Filter"
+                                v3_color = "#ff6b6b"
 
             _game_states[game_id] = {'state': abstract_state, 'lineups_hash': hash(tuple(away_lineup+home_lineup)), 'v3_data': {'pick': v3_pick, 'color': v3_color, 'reason': v3_reason}}
 
+            def format_odds(odds):
+                if odds == 'N/A': return ''
+                return f"+{odds}" if isinstance(odds, int) and odds > 0 else str(odds)
+
             games.append({
                 'game_id': game_id, 'away_team': away_team, 'home_team': home_team, 'game_time': game_time_pt,
+                'away_odds': format_odds(away_odds), 'home_odds': format_odds(home_odds),
                 'abstract_state': abstract_state, 'detailed_state': detailed_state,
                 'away_score': away_score, 'home_score': home_score, 'inning_info': inning_info,
                 'away_pitcher': away_p, 'home_pitcher': home_p, 'away_p_stats': away_p_stats, 'home_p_stats': home_p_stats,
@@ -430,6 +502,10 @@ def render_card(g):
     score_html = render_score_banner(g)
     v3_banner = f'<div class="v3-banner" style="border-color:{g.get("v3_color", "#888")}"><span class="v3-pick" style="color:{g.get("v3_color", "#888")}">{g.get("v3_pick", "")}</span><span class="v3-reason">{g.get("v3_reason", "")}</span></div>'
 
+    # Injecting Live Odds into the Title Header
+    away_odds_disp = f'<span style="color:#88ff44; font-size:0.85em; margin-left:8px">[{g.get("away_odds", "")}]</span>' if g.get("away_odds") else ''
+    home_odds_disp = f'<span style="color:#88ff44; font-size:0.85em; margin-left:8px">[{g.get("home_odds", "")}]</span>' if g.get("home_odds") else ''
+    
     pitchers_html = f'<div class="pr">{render_pitcher_block(g["away_pitcher"], g["away_p_stats"])}{render_pitcher_block(g["home_pitcher"], g["home_p_stats"])}</div>'
     roster_html = f'<div class="pr"><div style="flex:1">{render_roster_metrics(g["away_team"], g["a_bp_xera"], g["a_bench"], g["a_tired"])}</div><div style="flex:1">{render_roster_metrics(g["home_team"], g["h_bp_xera"], g["h_bench"], g["h_tired"])}</div></div>'
     
@@ -445,7 +521,7 @@ def render_card(g):
         
     header_right = '<span class="gt" style="color:#888">FINAL</span>' if state == 'Final' else f'<span class="gt" style="color:#ff4444">🔴 LIVE · {g["inning_info"]}</span>' if state == 'Live' else f'<span class="gt">🕐 {g["game_time"]}</span>'
         
-    return f'<div class="game {border_cls}"><div class="gh"><h3>{g["away_team"]} @ {g["home_team"]}</h3>{header_right}</div>{score_html}{v3_banner}<div class="badges"><span class="badge {pf_cls}">🏠 PF {pf} · {pf_label}</span>{weather_html}</div>{pitchers_html}{roster_html}{lineups_html}</div>'
+    return f'<div class="game {border_cls}"><div class="gh"><h3>{g["away_team"]} {away_odds_disp} @ {g["home_team"]} {home_odds_disp}</h3>{header_right}</div>{score_html}{v3_banner}<div class="badges"><span class="badge {pf_cls}">🏠 PF {pf} · {pf_label}</span>{weather_html}</div>{pitchers_html}{roster_html}{lineups_html}</div>'
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
 @app.route('/')
@@ -518,12 +594,12 @@ def index():
         
     html = f"""<!DOCTYPE html><html>
     <head>
-      <title>MLB V4.2 Dashboard</title>
+      <title>MLB V4.6.1 Dashboard</title>
       <meta name="viewport" content="width=device-width,initial-scale=1">
       <style>{css}</style>
     </head>
     <body>
-      <h1>⚾ MLB V4.2 Fatigue Engine & Dashboard</h1>
+      <h1>⚾ MLB V4.6.1 Sniper Engine (Live Odds)</h1>
       <p class="sub">Last updated: {now_pt.strftime('%I:%M %p PT')} · {now_pt.strftime('%b %d, %Y')}</p>
       {section('🔴 Live Now', '#ff4444', live)}
       {section('✅ Lineups Confirmed', '#00ff88', confirmed)}
