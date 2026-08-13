@@ -13,7 +13,6 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
 # ─── API KEYS & CONFIG ────────────────────────────────────────────────────────
-# Your new API key from theoddsapi.com
 ODDS_API_KEY = "toa_live_3ofpyj5mayimyz5t"
 
 # ─── Cache & Global State ─────────────────────────────────────────────────────
@@ -56,16 +55,14 @@ TEAM_CITIES = {
     'San Diego Padres': 'San+Diego+CA', 'Oakland Athletics': 'Sacramento+CA',
 }
 
-# ─── LIVE ODDS ENGINE (V4.6.1 User Custom API) ────────────────────────────────
+# ─── LIVE ODDS ENGINE (V4.6.2 TheOddsAPI Structure) ───────────────────────────
 def normalize_team_name(name):
-    """Matches odds API team names (like 'LA Dodgers') to MLB API names."""
     if not name: return name
     for full_name in PARK_FACTORS.keys():
         if name.lower() == full_name.lower():
             return full_name
-        # Match by Mascot (e.g. "Dodgers")
         if name.split()[-1].lower() == full_name.split()[-1].lower():
-            if "Sox" in name: # Handle Red Sox / White Sox collision
+            if "Sox" in name: 
                 if "White" in name and "White" in full_name: return full_name
                 if "Red" in name and "Red" in full_name: return full_name
             else:
@@ -75,28 +72,34 @@ def normalize_team_name(name):
 def get_live_odds():
     def fetch():
         try:
-            url = "https://api.theoddsapi.com/odds/?sport_key=baseball_mlb"
-            headers = {"x-api-key": ODDS_API_KEY}
-            r = requests.get(url, headers=headers, timeout=10)
+            url = f"https://api.theoddsapi.com/odds/?sport_key=baseball_mlb&apiKey={ODDS_API_KEY}"
+            r = requests.get(url, timeout=10)
             data = r.json()
             odds_map = {}
             
-            # The API likely returns a list of games in the 'data' node or as the root
-            games = data if isinstance(data, list) else data.get('data', [])
+            # This specific API wraps the game list inside a "data" node
+            games = data.get('data', []) if isinstance(data, dict) else data
             
             for game in games:
-                bookmakers = game.get('bookmakers', [])
-                if not bookmakers: continue
+                books = game.get('books', [])
+                if not books: continue
                 
-                # Prefer DraftKings, otherwise take the first book available
-                book = next((b for b in bookmakers if b.get('key') == 'draftkings'), bookmakers[0])
-                markets = book.get('markets', [])
-                if not markets: continue
+                # Filter out everything except Moneyline (h2h) markets
+                h2h_books = [b for b in books if b.get('market') == 'h2h']
+                if not h2h_books: continue
                 
-                # h2h is standard for Moneyline
-                h2h = next((m for m in markets if m.get('key') == 'h2h'), markets[0])
-                outcomes = h2h.get('outcomes', [])
+                # Try to use FanDuel or DraftKings lines first for accuracy
+                preferred_book = None
+                for b in h2h_books:
+                    if b.get('book') in ['fanduel', 'draftkings']:
+                        preferred_book = b
+                        break
                 
+                # If neither is available, grab the first available sportsbook line
+                if not preferred_book:
+                    preferred_book = h2h_books[0]
+                    
+                outcomes = preferred_book.get('outcomes', [])
                 for outcome in outcomes:
                     raw_team_name = outcome.get('name')
                     price = outcome.get('price')
@@ -108,7 +111,7 @@ def get_live_odds():
         except Exception as e:
             logger.error(f"Live Odds API Failed: {e}")
             return {}
-    return cached('live_odds', fetch, ttl=1800) # Cache for 30 minutes to save API quota
+    return cached('live_odds', fetch, ttl=1800) # Cache for 30 mins
 
 # ─── Fuzzy Name Lookup ─────────────────────────────────────────
 def fuzzy_lookup(name, data_dict):
@@ -399,7 +402,7 @@ def get_todays_games():
                         # 🚨 THE V4.6 AUTO-ODDS PRICE FILTER
                         if "PLAY" in v3_pick:
                             target_odds = away_odds if away_team in v3_pick else home_odds
-                            if isinstance(target_odds, int) and target_odds < -150: # Negative American odds: -160 is less than -150
+                            if isinstance(target_odds, int) and target_odds < -150:
                                 v3_pick = f"🛑 SKIP (Price Filter)"
                                 v3_reason = f"Odds ({target_odds}) violate -150 Max Price Filter"
                                 v3_color = "#ff6b6b"
@@ -594,12 +597,12 @@ def index():
         
     html = f"""<!DOCTYPE html><html>
     <head>
-      <title>MLB V4.6.1 Dashboard</title>
+      <title>MLB V4.6.2 Dashboard</title>
       <meta name="viewport" content="width=device-width,initial-scale=1">
       <style>{css}</style>
     </head>
     <body>
-      <h1>⚾ MLB V4.6.1 Sniper Engine (Live Odds)</h1>
+      <h1>⚾ MLB V4.6.2 Sniper Engine (Live Odds)</h1>
       <p class="sub">Last updated: {now_pt.strftime('%I:%M %p PT')} · {now_pt.strftime('%b %d, %Y')}</p>
       {section('🔴 Live Now', '#ff4444', live)}
       {section('✅ Lineups Confirmed', '#00ff88', confirmed)}
