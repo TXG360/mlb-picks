@@ -5,6 +5,7 @@ import pytz
 import csv
 import io
 import logging
+import re
 
 app = Flask(__name__)
 
@@ -113,23 +114,48 @@ def get_live_odds():
             return {}
     return cached('live_odds', fetch, ttl=1800) # Cache for 30 mins
 
-# ─── Fuzzy Name Lookup ─────────────────────────────────────────
+# ─── Fuzzy Name Lookup & Normalization (V5 UPGRADE) ────────────
+def normalize_player_name(name):
+    """Strips suffixes, accents, and punctuation to ensure perfect matching."""
+    if not name: return ""
+    # Remove common suffixes
+    name = re.sub(r'\b(Jr\.|Sr\.|II|III|IV)\b', '', name, flags=re.IGNORECASE)
+    # Remove apostrophes, hyphens, and periods
+    name = re.sub(r"['\-\.]", '', name)
+    # Convert to lowercase and strip extra whitespace
+    return ' '.join(name.lower().split())
+
 def fuzzy_lookup(name, data_dict):
     if not data_dict or not name: return None
-    name_clean = name.lower().strip()
+    
+    target_name = normalize_player_name(name)
+    
+    # 1. Try Exact Normalized Match
     for key in data_dict:
-        if key.lower().strip() == name_clean: return data_dict[key]
-    parts = name.split()
+        if normalize_player_name(key) == target_name: 
+            return data_dict[key]
+            
+    # 2. Try First Initial + Last Name (e.g., "B Witt" -> "Bobby Witt")
+    parts = target_name.split()
     if not parts: return None
-    first_init, last_name = parts[0][0].lower(), parts[-1].lower()
+    
+    first_init, last_name = parts[0][0], parts[-1]
+    
     for key in data_dict:
-        k_parts = key.split()
-        if len(k_parts) > 1 and k_parts[0][0].lower() == first_init and k_parts[-1].lower() == last_name: return data_dict[key]
+        k_parts = normalize_player_name(key).split()
+        if len(k_parts) > 1 and k_parts[0][0] == first_init and k_parts[-1] == last_name: 
+            return data_dict[key]
+            
+    # 3. Fallback: Last Name Only Match
     for key in data_dict:
-        if key.split() and key.split()[-1].lower() == last_name: return data_dict[key]
+        k_parts = normalize_player_name(key).split()
+        if k_parts and k_parts[-1] == last_name: 
+            return data_dict[key]
+            
     return None
 
-def clean(val): return str(val).strip().strip('"').strip("'").strip()
+def clean(val): 
+    return str(val).strip().strip('"').strip("'").strip()
 
 # ─── Statcast Data (CSV Parsing) ──────────────────────────────────────────────
 def get_statcast_batter_data():
