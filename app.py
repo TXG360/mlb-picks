@@ -6,6 +6,7 @@ import csv
 import io
 import logging
 import re
+import os
 
 app = Flask(__name__)
 
@@ -20,6 +21,7 @@ ODDS_API_KEY = "toa_live_3ofpyj5mayimyz5t"
 _cache = {}
 CACHE_TTL = 3600
 _game_states = {} 
+LOG_FILE = "v4_algorithm_ledger.csv"
 
 CURRENT_YEAR = datetime.now().year
 
@@ -30,6 +32,64 @@ def cached(key, fn, ttl=CACHE_TTL):
     result = fn()
     _cache[key] = {'data': result, 'ts': now}
     return result
+
+# ─── CSV Auto-Logger ──────────────────────────────────────────────────────────
+def init_csv_logger():
+    """Creates the CSV file with headers if it doesn't exist."""
+    if not os.path.exists(LOG_FILE):
+        with open(LOG_FILE, mode='w', newline='', encoding='utf-8') as file:
+            writer = csv.writer(file)
+            writer.writerow([
+                "Date", "Game ID", "Away Team", "Home Team", 
+                "Away Score", "Home Score", "Result State",
+                "Algorithm Pick", "Reason / Edge", "Color Code"
+            ])
+
+def log_final_games(games_list):
+    """Logs completely finished games to a CSV file for historical tracking."""
+    init_csv_logger()
+    
+    logged_ids = set()
+    try:
+        with open(LOG_FILE, mode='r', encoding='utf-8') as file:
+            reader = csv.reader(file)
+            next(reader, None) # Skip header
+            for row in reader:
+                if row and len(row) > 1:
+                    logged_ids.add(row[1])
+    except Exception as e:
+        logger.error(f"Error reading CSV: {e}")
+
+    new_logs = []
+    pacific = pytz.timezone('America/Los_Angeles')
+    today_str = datetime.now(pacific).strftime('%Y-%m-%d')
+
+    for g in games_list:
+        game_id = str(g.get('game_id'))
+        state = g.get('abstract_state')
+
+        if state == 'Final' and game_id not in logged_ids:
+            new_logs.append([
+                today_str,
+                game_id,
+                g.get('away_team'),
+                g.get('home_team'),
+                g.get('away_score', 0),
+                g.get('home_score', 0),
+                state,
+                g.get('v3_pick', 'No Pick'),
+                g.get('v3_reason', 'None'),
+                g.get('v3_color', '')
+            ])
+
+    if new_logs:
+        try:
+            with open(LOG_FILE, mode='a', newline='', encoding='utf-8') as file:
+                writer = csv.writer(file)
+                writer.writerows(new_logs)
+            logger.info(f"✅ Successfully logged {len(new_logs)} completed games to the database.")
+        except Exception as e:
+            logger.error(f"Error writing to CSV: {e}")
 
 # ─── Park Factors & Teams ─────────────────────────────────────────────────────
 PARK_FACTORS = {
@@ -78,25 +138,21 @@ def get_live_odds():
             data = r.json()
             odds_map = {}
             
-            # This specific API wraps the game list inside a "data" node
             games = data.get('data', []) if isinstance(data, dict) else data
             
             for game in games:
                 books = game.get('books', [])
                 if not books: continue
                 
-                # Filter out everything except Moneyline (h2h) markets
                 h2h_books = [b for b in books if b.get('market') == 'h2h']
                 if not h2h_books: continue
                 
-                # Try to use FanDuel or DraftKings lines first for accuracy
                 preferred_book = None
                 for b in h2h_books:
                     if b.get('book') in ['fanduel', 'draftkings']:
                         preferred_book = b
                         break
                 
-                # If neither is available, grab the first available sportsbook line
                 if not preferred_book:
                     preferred_book = h2h_books[0]
                     
@@ -112,17 +168,13 @@ def get_live_odds():
         except Exception as e:
             logger.error(f"Live Odds API Failed: {e}")
             return {}
-    return cached('live_odds', fetch, ttl=1800) # Cache for 30 mins
+    return cached('live_odds', fetch, ttl=1800) 
 
 # ─── Fuzzy Name Lookup & Normalization (V5 UPGRADE) ────────────
 def normalize_player_name(name):
-    """Strips suffixes, accents, and punctuation to ensure perfect matching."""
     if not name: return ""
-    # Remove common suffixes
     name = re.sub(r'\b(Jr\.|Sr\.|II|III|IV)\b', '', name, flags=re.IGNORECASE)
-    # Remove apostrophes, hyphens, and periods
     name = re.sub(r"['\-\.]", '', name)
-    # Convert to lowercase and strip extra whitespace
     return ' '.join(name.lower().split())
 
 def fuzzy_lookup(name, data_dict):
@@ -130,12 +182,10 @@ def fuzzy_lookup(name, data_dict):
     
     target_name = normalize_player_name(name)
     
-    # 1. Try Exact Normalized Match
     for key in data_dict:
         if normalize_player_name(key) == target_name: 
             return data_dict[key]
             
-    # 2. Try First Initial + Last Name (e.g., "B Witt" -> "Bobby Witt")
     parts = target_name.split()
     if not parts: return None
     
@@ -146,7 +196,6 @@ def fuzzy_lookup(name, data_dict):
         if len(k_parts) > 1 and k_parts[0][0] == first_init and k_parts[-1] == last_name: 
             return data_dict[key]
             
-    # 3. Fallback: Last Name Only Match
     for key in data_dict:
         k_parts = normalize_player_name(key).split()
         if k_parts and k_parts[-1] == last_name: 
@@ -292,7 +341,7 @@ def get_full_roster_metrics(team_id, starter_name, lineup_names, pitcher_sc, bat
     
     return bp_xera, bench_xwoba, len(high_leverage), fatigued_count
 
-# ─── Core Logic Helpers (V4.5 Sniper Mode) ─────────────────────────
+# ─── Core Logic Helpers (V4.6.2 Sniper Mode) ─────────────────────────
 def get_top_4_xwoba(lineup_sc):
     if not lineup_sc or len(lineup_sc) < 4: return 0.0
     vals = []
@@ -394,7 +443,14 @@ def get_todays_games():
 
             game_id = game['gamePk']
             cached_state = _game_states.get(game_id)
+            
             v3_pick, v3_color, v3_reason = "Awaiting Lineups/Pitchers", "#888", "Missing pitcher/statcast data"
+            
+            # --- EXPLICIT GAUNTLET CALCS FOR API EXPORT ---
+            a_top4_xwoba = get_top_4_xwoba(away_lineup_sc)
+            h_top4_xwoba = get_top_4_xwoba(home_lineup_sc)
+            a_blended_xera = None
+            h_blended_xera = None
 
             if cached_state and (abstract_state in ['Live', 'Final'] or (abstract_state == 'Preview' and hash(tuple(away_lineup+home_lineup)) == cached_state['lineups_hash'])):
                 v3_pick, v3_color, v3_reason = cached_state['v3_data'].values()
@@ -404,34 +460,59 @@ def get_todays_games():
                     v3_pick = "🛑 SKIP (Missing Data)"
                     v3_reason = "Incomplete statcast profiles in confirmed lineup."
                 else:
-                    a_blended = blended_pitching_metric_v4(away_p_stats.get('xERA') if away_p_stats else None, a_bp_xera)
-                    h_blended = blended_pitching_metric_v4(home_p_stats.get('xERA') if home_p_stats else None, h_bp_xera)
+                    # RULE 1: IP FLOOR ENFORCEMENT
+                    try: a_ip = float(away_p_stats.get('IP', 0)) if away_p_stats else 0
+                    except: a_ip = 0
+                    try: h_ip = float(home_p_stats.get('IP', 0)) if home_p_stats else 0
+                    except: h_ip = 0
+                    
+                    if a_ip < 25 or h_ip < 25:
+                        v3_color = "#888"
+                        v3_pick = "🛑 SKIP (Small Sample)"
+                        v3_reason = f"Pitcher IP under 25.0 minimum (A: {a_ip}, H: {h_ip})"
+                    else:
+                        a_blended_xera = blended_pitching_metric_v4(away_p_stats.get('xERA') if away_p_stats else None, a_bp_xera)
+                        h_blended_xera = blended_pitching_metric_v4(home_p_stats.get('xERA') if home_p_stats else None, h_bp_xera)
 
-                    if a_blended and h_blended and len(away_lineup) >= 4 and len(home_lineup) >= 4:
-                        away_adv, home_adv = h_blended - a_blended, a_blended - h_blended
-                        if a_bench < 0.280: away_adv -= 0.15 
-                        if h_bench < 0.280: home_adv -= 0.15
+                        if a_blended_xera and h_blended_xera and len(away_lineup) >= 4 and len(home_lineup) >= 4:
+                            away_adv = h_blended_xera - a_blended_xera
+                            home_adv = a_blended_xera - h_blended_xera
+                            
+                            # RULE 5: BENCH PENALTY
+                            if a_bench < 0.280: away_adv -= 0.15 
+                            if h_bench < 0.280: home_adv -= 0.15
 
-                        req_away, req_home = evaluate_buzzsaw(get_top_4_xwoba(home_lineup_sc)), evaluate_buzzsaw(get_top_4_xwoba(away_lineup_sc))
-                        max_adv = max(away_adv, home_adv)
-                        raw_lean_team = away_team if away_adv > home_adv else home_team if home_adv > away_adv else "Tie"
+                            # RULE 7: BUZZSAW SCALING 
+                            req_away = evaluate_buzzsaw(h_top4_xwoba)
+                            req_home = evaluate_buzzsaw(a_top4_xwoba)
+                            
+                            max_adv = max(away_adv, home_adv)
+                            raw_lean_team = away_team if away_adv > home_adv else home_team if home_adv > away_adv else "Tie"
 
-                        if away_adv >= req_away: 
-                            v3_pick, v3_color, v3_reason = f"🟢 V4.6 PLAY {away_team} ML", "#00ff88", f"+{away_adv:.2f} Adjusted Edge"
-                        elif home_adv >= req_home: 
-                            v3_pick, v3_color, v3_reason = f"🟢 V4.6 PLAY {home_team} ML", "#00ff88", f"+{home_adv:.2f} Adjusted Edge"
-                        else: 
-                            v3_color = "#ff6b6b"
-                            if max_adv > 0: v3_pick, v3_reason = f"🛑 SKIP ({raw_lean_team})", f"Margin too thin (+{max_adv:.2f} edge max)"
-                            else: v3_pick, v3_reason = "🛑 SKIP", "Metrics dead even"
-
-                        # 🚨 THE V4.6 AUTO-ODDS PRICE FILTER
-                        if "PLAY" in v3_pick:
-                            target_odds = away_odds if away_team in v3_pick else home_odds
-                            if isinstance(target_odds, int) and target_odds < -150:
-                                v3_pick = f"🛑 SKIP (Price Filter)"
-                                v3_reason = f"Odds ({target_odds}) violate -150 Max Price Filter"
+                            # RULE 9: FINAL VERDICT
+                            if away_adv >= req_away: 
+                                v3_pick, v3_color, v3_reason = f"🟢 V4.6 PLAY {away_team} ML", "#00ff88", f"+{away_adv:.2f} Edge (>{req_away:.2f} req)"
+                            elif home_adv >= req_home: 
+                                v3_pick, v3_color, v3_reason = f"🟢 V4.6 PLAY {home_team} ML", "#00ff88", f"+{home_adv:.2f} Edge (>{req_home:.2f} req)"
+                            else: 
                                 v3_color = "#ff6b6b"
+                                if max_adv > 0: 
+                                    req_for_max = req_away if away_adv > home_adv else req_home
+                                    v3_pick, v3_reason = f"🛑 SKIP ({raw_lean_team})", f"Margin too thin (+{max_adv:.2f} edge < {req_for_max:.2f} req)"
+                                else: 
+                                    v3_pick, v3_reason = "🛑 SKIP", "Metrics dead even"
+
+                            # RULE 10: PRICE FILTER
+                            if "PLAY" in v3_pick:
+                                target_odds = away_odds if away_team in v3_pick else home_odds
+                                try:
+                                    t_odds_int = int(target_odds)
+                                    if t_odds_int < -150:
+                                        v3_pick = f"🛑 SKIP (Price Filter)"
+                                        v3_reason = f"Odds ({t_odds_int}) violate -150 Max Price Filter"
+                                        v3_color = "#ff6b6b"
+                                except:
+                                    pass # Odds might be 'N/A' or missing
 
             _game_states[game_id] = {'state': abstract_state, 'lineups_hash': hash(tuple(away_lineup+home_lineup)), 'v3_data': {'pick': v3_pick, 'color': v3_color, 'reason': v3_reason}}
 
@@ -449,10 +530,16 @@ def get_todays_games():
                 'away_lineup_sc': away_lineup_sc, 'home_lineup_sc': home_lineup_sc,
                 'a_bp_xera': a_bp_xera, 'a_bench': a_bench, 'a_tired': a_tired,
                 'h_bp_xera': h_bp_xera, 'h_bench': h_bench, 'h_tired': h_tired,
+                'a_top4_xwoba': a_top4_xwoba, 'h_top4_xwoba': h_top4_xwoba,
+                'a_blended_xera': a_blended_xera, 'h_blended_xera': h_blended_xera,
                 'lineup_confirmed': len(away_lineup) > 0 and len(home_lineup) > 0,
                 'weather': get_weather(home_team), 'park_factor': PARK_FACTORS.get(home_team, 100),
                 'v3_pick': v3_pick, 'v3_color': v3_color, 'v3_reason': v3_reason,
             })
+            
+    # Trigger the CSV Auto-Logger for any newly finished games
+    log_final_games(games)
+    
     return games
 
 # ─── HTML Frontend Helpers ────────────────────────────────────────────────────
@@ -531,7 +618,6 @@ def render_card(g):
     score_html = render_score_banner(g)
     v3_banner = f'<div class="v3-banner" style="border-color:{g.get("v3_color", "#888")}"><span class="v3-pick" style="color:{g.get("v3_color", "#888")}">{g.get("v3_pick", "")}</span><span class="v3-reason">{g.get("v3_reason", "")}</span></div>'
 
-    # Injecting Live Odds into the Title Header
     away_odds_disp = f'<span style="color:#88ff44; font-size:0.85em; margin-left:8px">[{g.get("away_odds", "")}]</span>' if g.get("away_odds") else ''
     home_odds_disp = f'<span style="color:#88ff44; font-size:0.85em; margin-left:8px">[{g.get("home_odds", "")}]</span>' if g.get("home_odds") else ''
     
@@ -643,5 +729,3 @@ def api_games():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000, debug=False)
-
-
