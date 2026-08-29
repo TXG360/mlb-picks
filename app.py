@@ -15,7 +15,6 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
 # ─── API KEYS & CONFIG ────────────────────────────────────────────────────────
-# 3-Key Rotation: 1,500 monthly requests
 ODDS_API_KEYS = [
     "toa_live_3ofpyj5mayimyz5t", 
     "toa_live_fuft13uimb8wwxji", 
@@ -149,32 +148,46 @@ def get_live_odds():
             if not api_key: continue
             
             try:
-                url = f"https://api.theoddsapi.com/v4/sports/baseball_mlb/odds/?apiKey={api_key}&regions=us&markets=h2h&oddsFormat=american"
-                r = requests.get(url, timeout=10)
+                # 🛑 FIX: Using exact endpoint and Header Auth requested by Neil's email
+                url = "https://api.theoddsapi.com/odds/?sport_key=baseball_mlb"
+                headers = {"x-api-key": api_key}
                 
-                if r.status_code in [429, 401]:
+                r = requests.get(url, headers=headers, timeout=10)
+                
+                if r.status_code in [429, 401, 403]:
                     logger.warning(f"Key {api_key[:8]}... failed (limit/invalid). Rotating to next.")
                     continue 
                     
                 data = r.json()
                 odds_map = {}
                 
-                if not isinstance(data, list):
+                games = data.get('data', []) if isinstance(data, dict) else data
+                if not isinstance(games, list):
                     continue
                 
-                for game in data:
-                    bookmakers = game.get('bookmakers', [])
-                    if not bookmakers: continue
+                for game in games:
+                    books = game.get('books', [])
+                    if not books: continue
                     
-                    preferred_book = next((b for b in bookmakers if b.get('key') in ['draftkings', 'fanduel']), bookmakers[0])
+                    h2h_books = [b for b in books if b.get('market') == 'h2h']
+                    if not h2h_books: continue
+                    
+                    preferred_book = None
+                    for b in h2h_books:
+                        if b.get('book') in ['fanduel', 'draftkings']:
+                            preferred_book = b
+                            break
+                    
+                    if not preferred_book:
+                        preferred_book = h2h_books[0]
                         
-                    for market in preferred_book.get('markets', []):
-                        if market.get('key') == 'h2h':
-                            for outcome in market.get('outcomes', []):
-                                raw_team_name = outcome.get('name')
-                                price = outcome.get('price')
-                                if raw_team_name and price is not None:
-                                    odds_map[normalize_team_name(raw_team_name)] = price
+                    outcomes = preferred_book.get('outcomes', [])
+                    for outcome in outcomes:
+                        raw_team_name = outcome.get('name')
+                        price = outcome.get('price')
+                        if raw_team_name and price is not None:
+                            normalized_name = normalize_team_name(raw_team_name)
+                            odds_map[normalized_name] = price
                                     
                 return odds_map 
                 
