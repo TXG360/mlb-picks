@@ -649,12 +649,97 @@ def render_card(g):
         
     return f'<div class="game {border_cls}"><div class="gh"><h3>{g["away_team"]} {away_odds_disp} @ {g["home_team"]} {home_odds_disp}</h3>{header_right}</div>{score_html}{v3_banner}<div class="badges"><span class="badge {pf_cls}">🏠 PF {pf} · {pf_label}</span>{weather_html}</div>{pitchers_html}{roster_html}{lineups_html}</div>'
 
+# ─── API Routes ───────────────────────────────────────────────────────────────
+@app.route('/')
+def index():
+    pacific = pytz.timezone('America/Los_Angeles')
+    now_pt  = datetime.now(pacific)
+    games   = cached('games_list', get_todays_games)
+    
+    live      = [g for g in games if g['abstract_state'] == 'Live']
+    confirmed = [g for g in games if g['abstract_state'] == 'Preview' and g['lineup_confirmed']]
+    pending   = [g for g in games if g['abstract_state'] == 'Preview' and not g['lineup_confirmed']]
+    final     = [g for g in games if g['abstract_state'] == 'Final']
+    
+    css = """
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:Arial,sans-serif;background:#1a1a2e;color:#eee;padding:16px;max-width:1100px;margin:auto}
+    h1{color:#ffd700;font-size:1.5em;margin-bottom:4px}
+    h2{font-size:1.1em;margin:16px 0 8px}
+    h3{color:#eee;font-size:1em}
+    .sub{color:#888;font-size:0.82em;margin-bottom:16px}
+    .game{background:#16213e;border:1px solid #0f3460;padding:14px;margin:10px 0;border-radius:10px}
+    .confirmed{border-left:4px solid #00ff88}
+    .pending{border-left:4px solid #ff6b6b}
+    .live-game{border-left:4px solid #ff4444;background:#1e1020}
+    .final-game{border-left:4px solid #444;opacity:0.75}
+    .gh{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+    .gt{color:#aaa;font-size:0.82em}
+    .score-banner{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-radius:6px;margin-bottom:10px;font-size:0.9em}
+    .score-banner.final{background:#1a1a1a;color:#aaa}
+    .score-banner.live{background:#2a0a0a;color:#ff8888}
+    .score-num{font-size:1.3em;font-weight:bold;color:#ffd700}
+    .score-label{font-size:0.78em;color:#888}
+    .score-banner.live .score-label{color:#ff6666}
+    .v3-banner{background:#0a0f1a;border:1px solid;padding:10px 14px;margin-bottom:12px;border-radius:6px;display:flex;justify-content:space-between;align-items:center}
+    .v3-pick{font-weight:bold;font-size:1.05em;letter-spacing:0.5px}
+    .v3-reason{color:#aaa;font-size:0.85em;text-align:right}
+    .badges{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
+    .badge{font-size:0.73em;padding:3px 8px;border-radius:12px}
+    .hitter{background:#3d1515;color:#ff6b6b}
+    .pitcher-park{background:#0d2e1a;color:#00ff88}
+    .neutral{background:#1e1e3a;color:#aaa}
+    .wx{background:#1a2a3a;color:#7ec8e3}
+    .dome{background:#2a2a2a;color:#888}
+    .pr{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:10px}
+    .pitcher-block{flex:1;min-width:220px;background:#0f1929;border-radius:8px;padding:10px}
+    .roster-metrics{margin-top:8px; padding:10px; background:#1e1e3a; border-radius:6px; font-size:0.9em; color:#ddd; border-left:3px solid #7ec8e3;}
+    .pname{color:#ffd700;font-size:0.88em;margin-bottom:8px}
+    .sgrid{display:grid;grid-template-columns:repeat(5,1fr);gap:4px}
+    .sc{background:#1a2540;border-radius:4px;padding:4px 6px;text-align:center}
+    .sl{display:block;font-size:0.62em;color:#888}
+    .sv{display:block;font-size:0.88em;font-weight:bold}
+    .elite{color:#00ff88}.good{color:#88ff44}.avg{color:#ffd700}.bad{color:#ff6b6b}
+    .lu{margin-top:12px; background:#0f1929; padding:8px 12px; border-radius:6px;}
+    .lu summary{cursor:pointer;color:#aaa;font-size:0.85em;padding:4px 0; font-weight:bold;}
+    .lu summary:hover{color:#fff;}
+    .lu-row{display:flex;gap:16px;flex-wrap:wrap;margin-top:10px;font-size:0.82em;color:#ccc}
+    .lu-row ol{padding-left:22px;margin-top:6px}
+    .lu-row li{margin:3px 0}
+    .sc-tables-row{display:flex;gap:16px;flex-wrap:wrap;margin-top:16px}
+    .sc-table-wrap{flex:1;min-width:240px}
+    .sc-title{color:#7ec8e3;font-size:0.85em;margin-bottom:8px; font-weight:bold;}
+    .sc-table{width:100%;border-collapse:collapse;font-size:0.78em}
+    .sc-table th{color:#888;text-align:left;padding:4px 6px;border-bottom:1px solid #1a2540}
+    .sc-table td{padding:4px 6px;border-bottom:1px solid #1a2540}
+    .sc-table tr:hover td{background:#1a2540}
+    """
+    def section(title, color, items):
+        if not items: return ''
+        return f'<h2 style="color:{color}">{title} ({len(items)} games)</h2>' + ''.join(render_card(g) for g in items)
+        
+    html = f"""<!DOCTYPE html><html>
+    <head>
+      <title>MLB V5.1 Dashboard</title>
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      <style>{css}</style>
+    </head>
+    <body>
+      <h1>⚾ MLB V5.1 Sniper Engine</h1>
+      <p class="sub">Last updated: {now_pt.strftime('%I:%M %p PT')} &middot; {now_pt.strftime('%b %d, %Y')}</p>
+      {section('🔴 Live Now', '#ff4444', live)}
+      {section('✅ Lineups Confirmed', '#00ff88', confirmed)}
+      {section('⏳ Lineups Pending', '#ff6b6b', pending)}
+      {section('☑️ Completed', '#555', final)}
+    </body></html>"""
+    return html
+
 @app.route('/api')
 def api_base():
     """Safety net so visiting /api doesn't throw a 404 error."""
     return jsonify({
         "status": "Online",
-        "engine": "V4.6.2 with V5 Suffix Patch",
+        "engine": "V5.1",
         "endpoints": {
             "dashboard": "/",
             "json_feed": "/api/games",
@@ -673,12 +758,11 @@ def api_ledger():
             LOG_FILE,
             mimetype='text/csv',
             as_attachment=True,
-            download_name='v4_algorithm_ledger.csv'
+            download_name='v5_algorithm_ledger.csv'
         )
     else:
-        # Return a 200 OK so mobile Safari doesn't throw a generic white error screen
         return jsonify({
-            "message": "The ledger file is empty because no games have finished today yet. Check back after the first game goes 'Final'."
+            "message": "The ledger file is empty. Check back after the first game goes 'Final'."
         }), 200
 
 if __name__ == '__main__':
