@@ -15,10 +15,11 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
 # ─── API KEYS & CONFIG ────────────────────────────────────────────────────────
+# 3-Key Rotation: 1,500 monthly requests
 ODDS_API_KEYS = [
-    "toa_live_3ofpyj5mayimyz5t", # Key 1
-    "", # Paste your 2nd free key here inside the quotes
-    ""  # Paste your 3rd free key here inside the quotes
+    "toa_live_3ofpyj5mayimyz5t", 
+    "toa_live_fuft13uimb8wwxji", 
+    "toa_live_o04ab9ku89lj2k0x"  
 ]
 
 # ─── Cache & Global State ─────────────────────────────────────────────────────
@@ -480,6 +481,7 @@ def get_todays_games():
                 v3_reason = v3_data.get('reason', v3_reason)
             else:
                 if has_missing_data:
+                    # ⚪️ WHITE TIER (Missing Data)
                     v3_color = "#ffffff"
                     v3_pick = "⚪️ SKIP (Missing Data)"
                     v3_reason = "Incomplete statcast profiles in confirmed lineup."
@@ -490,6 +492,7 @@ def get_todays_games():
                     except: h_ip = 0
                     
                     if a_ip < 25 or h_ip < 25:
+                        # ⚪️ WHITE TIER (Small Sample)
                         v3_color = "#ffffff"
                         v3_pick = "⚪️ SKIP (Small Sample)"
                         v3_reason = f"Pitcher IP under 25.0 minimum (A: {a_ip}, H: {h_ip})"
@@ -515,6 +518,7 @@ def get_todays_games():
                             elif home_adv >= req_home: 
                                 v3_pick, v3_color, v3_reason = f"🟢 V4.6 PLAY {home_team} ML", "#00ff88", f"+{home_adv:.2f} Edge (>{req_home:.2f} req)"
                             else: 
+                                # ⚪️ WHITE TIER (Math Failed - Margin Too Thin)
                                 v3_color = "#ffffff"
                                 if max_adv > 0: 
                                     req_for_max = req_away if away_adv > home_adv else req_home
@@ -545,6 +549,7 @@ def get_todays_games():
                                     except (ValueError, TypeError):
                                         pass 
 
+            # Lock the state into the vault 
             _game_states[game_id] = {
                 'state': abstract_state, 
                 'lineups_hash': hash(tuple(away_lineup+home_lineup)), 
