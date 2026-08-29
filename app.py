@@ -16,9 +16,9 @@ logger = logging.getLogger(__name__)
 
 # ─── API KEYS & CONFIG ────────────────────────────────────────────────────────
 ODDS_API_KEYS = [
-    "toa_live_3ofpyj5mayimyz5t", 
-    "", # Add backup key here
-    ""  # Add backup key here
+    "toa_live_3ofpyj5mayimyz5t", # Key 1
+    "", # Paste your 2nd free key here inside the quotes
+    ""  # Paste your 3rd free key here inside the quotes
 ]
 
 # ─── Cache & Global State ─────────────────────────────────────────────────────
@@ -375,6 +375,17 @@ def blended_pitching_metric_v4(starter_xera, bullpen_xera):
     try: return ((5.0 / 9.0) * float(starter_xera)) + ((4.0 / 9.0) * bullpen_xera)
     except: return None
 
+# ─── Weather ──────────────────────────────────────────────────────────────────
+def get_weather(home_team):
+    if home_team in INDOOR_TEAMS: return {'label': 'Dome', 'relevant': False}
+    city = TEAM_CITIES.get(home_team)
+    if not city: return None
+    try:
+        r = requests.get(f"https://wttr.in/{city}?format=j1", timeout=5)
+        c = r.json()['current_condition'][0]
+        return {'label': c['weatherDesc'][0]['value'], 'temp': f"{c['temp_F']}°F", 'wind': f"{c['windspeedMiles']} mph {c['winddir16Point']}", 'relevant': True}
+    except: return None
+
 # ─── Game Loop ────────────────────────────────────────────────────────────────
 def get_todays_games():
     pacific = pytz.timezone('America/Los_Angeles')
@@ -402,8 +413,6 @@ def get_todays_games():
             home_score = game['teams']['home'].get('score')
             
             # 🛑 THE CLOSING ODDS MEMORY VAULT 🛑
-            # Only pull fresh odds if the game hasn't started yet. 
-            # Once it goes Live/Final, freeze the odds in memory forever so autopsies keep the closing line!
             live_away_odds = live_odds.get(away_team)
             live_home_odds = live_odds.get(home_team)
             
@@ -465,13 +474,11 @@ def get_todays_games():
             h_blended_xera = None
 
             if cached_state and (abstract_state in ['Live', 'Final'] or (abstract_state == 'Preview' and hash(tuple(away_lineup+home_lineup)) == cached_state['lineups_hash'])):
-                # If game started or lineup hasn't changed, pull previously calculated pick from memory vault
                 v3_data = cached_state.get('v3_data', {})
                 v3_pick = v3_data.get('pick', v3_pick)
                 v3_color = v3_data.get('color', v3_color)
                 v3_reason = v3_data.get('reason', v3_reason)
             else:
-                # Lineups are fresh, calculate the Gauntlet
                 if has_missing_data:
                     v3_color = "#ffffff"
                     v3_pick = "⚪️ SKIP (Missing Data)"
@@ -538,7 +545,6 @@ def get_todays_games():
                                     except (ValueError, TypeError):
                                         pass 
 
-            # Lock the state into the vault 
             _game_states[game_id] = {
                 'state': abstract_state, 
                 'lineups_hash': hash(tuple(away_lineup+home_lineup)), 
