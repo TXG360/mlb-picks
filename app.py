@@ -15,13 +15,17 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
 # ─── API KEYS & CONFIG ────────────────────────────────────────────────────────
-ODDS_API_KEY = "toa_live_3ofpyj5mayimyz5t"
+ODDS_API_KEYS = [
+    "toa_live_3ofpyj5mayimyz5t", 
+    "", # Add backup key here
+    ""  # Add backup key here
+]
 
 # ─── Cache & Global State ─────────────────────────────────────────────────────
 _cache = {}
 CACHE_TTL = 3600
 _game_states = {} 
-LOG_FILE = "v4_algorithm_ledger.csv"
+LOG_FILE = "v5_algorithm_ledger.csv"
 
 CURRENT_YEAR = datetime.now().year
 
@@ -116,7 +120,7 @@ TEAM_CITIES = {
     'San Diego Padres': 'San+Diego+CA', 'Oakland Athletics': 'Sacramento+CA',
 }
 
-# ─── LIVE ODDS ENGINE (V4 / American Odds) ────────────────────────────────────
+# ─── LIVE ODDS ENGINE (Auto-Rotating Keys & Smart Sleep) ──────────────────────
 def normalize_team_name(name):
     if not name: return name
     for full_name in PARK_FACTORS.keys():
@@ -132,43 +136,52 @@ def normalize_team_name(name):
 
 def get_live_odds():
     def fetch():
-        try:
-            # V4 API endpoint specifically requesting American odds (+150, -120)
-            url = f"https://api.theoddsapi.com/v4/sports/baseball_mlb/odds/?apiKey={ODDS_API_KEY}&regions=us&markets=h2h&oddsFormat=american"
-            r = requests.get(url, timeout=10)
-            games = r.json()
-            odds_map = {}
+        pacific = pytz.timezone('America/Los_Angeles')
+        now_pt = datetime.now(pacific)
+        
+        # 🌙 SMART SLEEP MODE: Pause requests between 1 AM and 8 AM PT.
+        if 1 <= now_pt.hour < 8:
+            logger.info("🌙 Smart Sleep Active: Pausing odds API requests until 8 AM PT.")
+            return _cache.get('live_odds', {}).get('data', {}) if 'live_odds' in _cache else {}
+
+        for api_key in ODDS_API_KEYS:
+            if not api_key: continue
             
-            if not isinstance(games, list):
-                logger.error(f"Live Odds API returned unexpected structure: {games}")
-                return {}
-            
-            for game in games:
-                bookmakers = game.get('bookmakers', [])
-                if not bookmakers: continue
+            try:
+                url = f"https://api.theoddsapi.com/v4/sports/baseball_mlb/odds/?apiKey={api_key}&regions=us&markets=h2h&oddsFormat=american"
+                r = requests.get(url, timeout=10)
                 
-                # Priority: DraftKings -> FanDuel -> Any First Available
-                preferred_book = None
-                for b in bookmakers:
-                    if b.get('key') in ['draftkings', 'fanduel']:
-                        preferred_book = b
-                        break
-                if not preferred_book:
-                    preferred_book = bookmakers[0]
+                if r.status_code in [429, 401]:
+                    logger.warning(f"Key {api_key[:8]}... failed (limit/invalid). Rotating to next.")
+                    continue 
                     
-                for market in preferred_book.get('markets', []):
-                    if market.get('key') == 'h2h':
-                        for outcome in market.get('outcomes', []):
-                            raw_team_name = outcome.get('name')
-                            price = outcome.get('price')
-                            if raw_team_name and price is not None:
-                                normalized_name = normalize_team_name(raw_team_name)
-                                odds_map[normalized_name] = price
-                                
-            return odds_map
-        except Exception as e:
-            logger.error(f"Live Odds API Failed: {e}")
-            return {}
+                data = r.json()
+                odds_map = {}
+                
+                if not isinstance(data, list):
+                    continue
+                
+                for game in data:
+                    bookmakers = game.get('bookmakers', [])
+                    if not bookmakers: continue
+                    
+                    preferred_book = next((b for b in bookmakers if b.get('key') in ['draftkings', 'fanduel']), bookmakers[0])
+                        
+                    for market in preferred_book.get('markets', []):
+                        if market.get('key') == 'h2h':
+                            for outcome in market.get('outcomes', []):
+                                raw_team_name = outcome.get('name')
+                                price = outcome.get('price')
+                                if raw_team_name and price is not None:
+                                    odds_map[normalize_team_name(raw_team_name)] = price
+                                    
+                return odds_map 
+                
+            except Exception as e:
+                logger.error(f"Live Odds API Failed on key {api_key[:8]}: {e}")
+                
+        return {}
+        
     return cached('live_odds', fetch, ttl=1800) 
 
 # ─── Fuzzy Name Lookup & Normalization (V5 UPGRADE) ────────────
@@ -362,17 +375,6 @@ def blended_pitching_metric_v4(starter_xera, bullpen_xera):
     try: return ((5.0 / 9.0) * float(starter_xera)) + ((4.0 / 9.0) * bullpen_xera)
     except: return None
 
-# ─── Weather ──────────────────────────────────────────────────────────────────
-def get_weather(home_team):
-    if home_team in INDOOR_TEAMS: return {'label': 'Dome', 'relevant': False}
-    city = TEAM_CITIES.get(home_team)
-    if not city: return None
-    try:
-        r = requests.get(f"https://wttr.in/{city}?format=j1", timeout=5)
-        c = r.json()['current_condition'][0]
-        return {'label': c['weatherDesc'][0]['value'], 'temp': f"{c['temp_F']}°F", 'wind': f"{c['windspeedMiles']} mph {c['winddir16Point']}", 'relevant': True}
-    except: return None
-
 # ─── Game Loop ────────────────────────────────────────────────────────────────
 def get_todays_games():
     pacific = pytz.timezone('America/Los_Angeles')
@@ -387,17 +389,30 @@ def get_todays_games():
     
     for date_entry in data.get('dates', []):
         for game in date_entry.get('games', []):
+            game_id = game['gamePk']
+            cached_state = _game_states.get(game_id, {})
+            
             away_team, home_team = game['teams']['away']['team']['name'], game['teams']['home']['team']['name']
             away_id, home_id = game['teams']['away']['team']['id'], game['teams']['home']['team']['id']
-            
-            away_odds = live_odds.get(away_team, 'N/A')
-            home_odds = live_odds.get(home_team, 'N/A')
             
             status = game.get('status', {})
             abstract_state = status.get('abstractGameState', '')
             detailed_state = status.get('detailedState', '')
             away_score = game['teams']['away'].get('score')
             home_score = game['teams']['home'].get('score')
+            
+            # 🛑 THE CLOSING ODDS MEMORY VAULT 🛑
+            # Only pull fresh odds if the game hasn't started yet. 
+            # Once it goes Live/Final, freeze the odds in memory forever so autopsies keep the closing line!
+            live_away_odds = live_odds.get(away_team)
+            live_home_odds = live_odds.get(home_team)
+            
+            if abstract_state in ['Live', 'Final']:
+                away_odds = cached_state.get('closing_odds', {}).get('away', live_away_odds)
+                home_odds = cached_state.get('closing_odds', {}).get('home', live_home_odds)
+            else:
+                away_odds = live_away_odds if live_away_odds is not None else cached_state.get('closing_odds', {}).get('away')
+                home_odds = live_home_odds if live_home_odds is not None else cached_state.get('closing_odds', {}).get('home')
             
             inning_info = ''
             if abstract_state == 'Live':
@@ -441,9 +456,6 @@ def get_todays_games():
 
             a_bp_xera, a_bench, a_rested, a_tired = get_full_roster_metrics(away_id, away_p, away_lineup, pitcher_sc, batter_sc)
             h_bp_xera, h_bench, h_rested, h_tired = get_full_roster_metrics(home_id, home_p, home_lineup, pitcher_sc, batter_sc)
-
-            game_id = game['gamePk']
-            cached_state = _game_states.get(game_id)
             
             v3_pick, v3_color, v3_reason = "Awaiting Lineups/Pitchers", "#888888", "Missing pitcher/statcast data"
             
@@ -453,10 +465,14 @@ def get_todays_games():
             h_blended_xera = None
 
             if cached_state and (abstract_state in ['Live', 'Final'] or (abstract_state == 'Preview' and hash(tuple(away_lineup+home_lineup)) == cached_state['lineups_hash'])):
-                v3_pick, v3_color, v3_reason = cached_state['v3_data'].values()
+                # If game started or lineup hasn't changed, pull previously calculated pick from memory vault
+                v3_data = cached_state.get('v3_data', {})
+                v3_pick = v3_data.get('pick', v3_pick)
+                v3_color = v3_data.get('color', v3_color)
+                v3_reason = v3_data.get('reason', v3_reason)
             else:
+                # Lineups are fresh, calculate the Gauntlet
                 if has_missing_data:
-                    # ⚪️ WHITE TIER (Missing Data)
                     v3_color = "#ffffff"
                     v3_pick = "⚪️ SKIP (Missing Data)"
                     v3_reason = "Incomplete statcast profiles in confirmed lineup."
@@ -467,7 +483,6 @@ def get_todays_games():
                     except: h_ip = 0
                     
                     if a_ip < 25 or h_ip < 25:
-                        # ⚪️ WHITE TIER (Small Sample)
                         v3_color = "#ffffff"
                         v3_pick = "⚪️ SKIP (Small Sample)"
                         v3_reason = f"Pitcher IP under 25.0 minimum (A: {a_ip}, H: {h_ip})"
@@ -493,7 +508,6 @@ def get_todays_games():
                             elif home_adv >= req_home: 
                                 v3_pick, v3_color, v3_reason = f"🟢 V4.6 PLAY {home_team} ML", "#00ff88", f"+{home_adv:.2f} Edge (>{req_home:.2f} req)"
                             else: 
-                                # ⚪️ WHITE TIER (Math Failed - Margin Too Thin)
                                 v3_color = "#ffffff"
                                 if max_adv > 0: 
                                     req_for_max = req_away if away_adv > home_adv else req_home
@@ -501,36 +515,39 @@ def get_todays_games():
                                 else: 
                                     v3_pick, v3_reason = "⚪️ SKIP (Dead Even)", "Metrics dead even"
 
-                            # RULE 10: DUAL-TIER PRICE FILTER (GHOST PLAY TRACKING)
+                            # RULE 10: DUAL-TIER PRICE FILTER 
                             if "PLAY" in v3_pick:
                                 target_team = away_team if away_team in v3_pick else home_team
                                 target_odds = away_odds if away_team in v3_pick else home_odds
                                 
-                                # EXPLICIT FALLBACK: If odds are missing, gracefully default to Green
                                 if target_odds in ('', 'N/A', None):
-                                    pass # Remains 🟢 GREEN
+                                    pass # Remains 🟢 GREEN if API fails
                                 else:
                                     try:
                                         t_odds_int = int(target_odds)
                                         if t_odds_int <= -201:
-                                            # 🛑 RED TIER (Math Passed, Unplayable Odds)
                                             original_edge = v3_reason.split('Edge')[0].strip()
                                             v3_pick = f"🛑 PRICE SKIP ({target_team})"
-                                            v3_reason = f"Odds {t_odds_int} hit -201+ hard limit. Math: {original_edge} Edge"
+                                            v3_reason = f"Odds {t_odds_int} hit -201+ limit. Math: {original_edge} Edge"
                                             v3_color = "#ff6b6b"
                                         elif t_odds_int <= -151:
-                                            # 🟡 YELLOW TIER (Math Passed, Mild Juice)
                                             original_edge = v3_reason.split('Edge')[0].strip()
                                             v3_pick = f"🟡 VALUE SKIP ({target_team})"
-                                            v3_reason = f"Odds {t_odds_int} in -151 to -200 zone. Math: {original_edge} Edge"
+                                            v3_reason = f"Odds {t_odds_int} heavily juiced. Math: {original_edge} Edge"
                                             v3_color = "#ffd700"
                                     except (ValueError, TypeError):
                                         pass 
 
-            _game_states[game_id] = {'state': abstract_state, 'lineups_hash': hash(tuple(away_lineup+home_lineup)), 'v3_data': {'pick': v3_pick, 'color': v3_color, 'reason': v3_reason}}
+            # Lock the state into the vault 
+            _game_states[game_id] = {
+                'state': abstract_state, 
+                'lineups_hash': hash(tuple(away_lineup+home_lineup)), 
+                'closing_odds': {'away': away_odds, 'home': home_odds},
+                'v3_data': {'pick': v3_pick, 'color': v3_color, 'reason': v3_reason}
+            }
 
             def format_odds(odds):
-                if odds == 'N/A' or odds == '': return ''
+                if odds in ('N/A', '', None): return ''
                 return f"+{odds}" if isinstance(odds, int) and odds > 0 else str(odds)
 
             games.append({
