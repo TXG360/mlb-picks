@@ -45,6 +45,7 @@ def init_csv_logger():
             writer = csv.writer(file)
             writer.writerow([
                 "Date", "Game ID", "Away Team", "Home Team", 
+                "Away Odds", "Home Odds", 
                 "Away Score", "Home Score", "Result State",
                 "Algorithm Pick", "Reason / Edge", "Color Code"
             ])
@@ -78,6 +79,8 @@ def log_final_games(games_list):
                 game_id,
                 g.get('away_team'),
                 g.get('home_team'),
+                g.get('away_odds', ''),
+                g.get('home_odds', ''),
                 g.get('away_score', 0),
                 g.get('home_score', 0),
                 state,
