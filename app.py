@@ -25,7 +25,7 @@ ODDS_API_KEYS = [
 _cache = {}
 CACHE_TTL = 3600
 _game_states = {} 
-LOG_FILE = "v5_algorithm_ledger.csv"
+LOG_FILE = "v5_2_algorithm_ledger.csv"
 
 CURRENT_YEAR = datetime.now().year
 
@@ -151,7 +151,6 @@ def get_live_odds():
             if not api_key: continue
             
             try:
-                # 🛑 FIX: Using exact endpoint and Header Auth requested by Neil's email
                 url = "https://api.theoddsapi.com/odds/?sport_key=baseball_mlb"
                 headers = {"x-api-key": api_key}
                 
@@ -201,7 +200,7 @@ def get_live_odds():
         
     return cached('live_odds', fetch, ttl=1800) 
 
-# ─── Fuzzy Name Lookup & Normalization (V5 UPGRADE) ────────────
+# ─── Fuzzy Name Lookup & Normalization ────────────────────────────────────────
 def normalize_player_name(name):
     if not name: return ""
     name = re.sub(r'\b(Jr\.|Sr\.|II|III|IV)\b', '', name, flags=re.IGNORECASE)
@@ -236,6 +235,14 @@ def fuzzy_lookup(name, data_dict):
 
 def clean(val): 
     return str(val).strip().strip('"').strip("'").strip()
+
+def get_stat_value(val_str, default=0.0):
+    """Safely extracts floats from Statcast string values (e.g., '27.0%')."""
+    if val_str in (None, 'N/A', '-', ''): return default
+    try:
+        return float(str(val_str).replace('%', '').strip())
+    except:
+        return default
 
 # ─── Statcast Data (CSV Parsing) ──────────────────────────────────────────────
 def get_statcast_batter_data():
@@ -304,7 +311,7 @@ def get_pitcher_stats_mlb(player_id, pitcher_name, sc_data):
         except: return None
     return cached(f'pitcher_{player_id}', fetch)
 
-# ─── V4.5 Fatigue Engine & Roster Metrics ─────────────────────────────────────
+# ─── Fatigue Engine & Roster Metrics ──────────────────────────────────────────
 def get_league_fatigue():
     def fetch():
         try:
@@ -372,7 +379,7 @@ def get_full_roster_metrics(team_id, starter_name, lineup_names, pitcher_sc, bat
     
     return bp_xera, bench_xwoba, len(high_leverage), fatigued_count
 
-# ─── Core Logic Helpers (V4.6.2 Sniper Mode) ─────────────────────────
+# ─── V5.2 Core Logic Helpers ──────────────────────────────────────────────────
 def get_top_4_xwoba(lineup_sc):
     if not lineup_sc or len(lineup_sc) < 4: return 0.0
     vals = []
@@ -382,10 +389,24 @@ def get_top_4_xwoba(lineup_sc):
         vals.append(float(val))
     return sum(vals) / len(vals) if vals else 0.0
 
-def evaluate_buzzsaw(opp_top_4_xwoba, base_required_delta=0.75): 
-    if opp_top_4_xwoba >= 0.365: return 1.60
-    elif opp_top_4_xwoba >= 0.350: return 1.15
-    return base_required_delta
+def count_elite_barrels(lineup_sc):
+    count = 0
+    for p in lineup_sc:
+        barrel = get_stat_value(p.get('statcast', {}).get('Barrel%', '0'))
+        if barrel >= 10.0:
+            count += 1
+    return count
+
+def evaluate_buzzsaw(opp_top_4_xwoba, pitcher_k, pitcher_whip, base_required_delta=0.75): 
+    hurdle = base_required_delta
+    if opp_top_4_xwoba >= 0.365: hurdle = 1.60
+    elif opp_top_4_xwoba >= 0.350: hurdle = 1.15
+    
+    # V5.2 K% Shield: Elite K% neutralizes buzzsaw hurdles
+    if pitcher_k >= 27.0 and pitcher_whip <= 1.15 and hurdle > base_required_delta:
+        hurdle = max(base_required_delta, hurdle - 0.40)
+        
+    return hurdle
 
 def blended_pitching_metric_v4(starter_xera, bullpen_xera):
     if starter_xera in ('N/A', None, ''): return None
@@ -517,32 +538,65 @@ def get_todays_games():
                         h_blended_xera = blended_pitching_metric_v4(home_p_stats.get('xERA') if home_p_stats else None, h_bp_xera)
 
                         if a_blended_xera and h_blended_xera and len(away_lineup) >= 4 and len(home_lineup) >= 4:
-                            away_adv = h_blended_xera - a_blended_xera
-                            home_adv = a_blended_xera - h_blended_xera
+                            
+                            # Extract V5.2 Pitching Metrics
+                            a_k = get_stat_value(away_p_stats.get('K%')) if away_p_stats else 0
+                            a_whip = get_stat_value(away_p_stats.get('WHIP')) if away_p_stats else 0
+                            a_bb = get_stat_value(away_p_stats.get('BB%')) if away_p_stats else 0
+                            a_kbb = a_k - a_bb
+                            
+                            h_k = get_stat_value(home_p_stats.get('K%')) if home_p_stats else 0
+                            h_whip = get_stat_value(home_p_stats.get('WHIP')) if home_p_stats else 0
+                            h_bb = get_stat_value(home_p_stats.get('BB%')) if home_p_stats else 0
+                            h_kbb = h_k - h_bb
+
+                            a_elite_barrels = count_elite_barrels(away_lineup_sc)
+                            h_elite_barrels = count_elite_barrels(home_lineup_sc)
+
+                            # WHIP Traffic Penalty: Opponent Expected Runs multiplier
+                            eff_a_blended = a_blended_xera * 1.15 if a_whip >= 1.35 else a_blended_xera
+                            eff_h_blended = h_blended_xera * 1.15 if h_whip >= 1.35 else h_blended_xera
+
+                            away_adv = eff_h_blended - a_blended_xera
+                            home_adv = eff_a_blended - h_blended_xera
                             
                             if a_bench < 0.280: away_adv -= 0.15 
                             if h_bench < 0.280: home_adv -= 0.15
 
-                            req_away = evaluate_buzzsaw(h_top4_xwoba)
-                            req_home = evaluate_buzzsaw(a_top4_xwoba)
+                            # V5.2 Buzzsaw Evaluation
+                            req_away = evaluate_buzzsaw(h_top4_xwoba, a_k, a_whip)
+                            req_home = evaluate_buzzsaw(a_top4_xwoba, h_k, h_whip)
+                            
+                            # V5.2 Circuit Breakers
+                            away_ptc_veto = (a_k < 19.5 and h_elite_barrels >= 4)
+                            home_ptc_veto = (h_k < 19.5 and a_elite_barrels >= 4)
                             
                             max_adv = max(away_adv, home_adv)
                             raw_lean_team = away_team if away_adv > home_adv else home_team if home_adv > away_adv else "Tie"
 
-                            if away_adv >= req_away: 
-                                v3_pick, v3_color, v3_reason = f"🟢 V4.6 PLAY {away_team} ML", "#00ff88", f"+{away_adv:.2f} Edge (>{req_away:.2f} req)"
-                            elif home_adv >= req_home: 
-                                v3_pick, v3_color, v3_reason = f"🟢 V4.6 PLAY {home_team} ML", "#00ff88", f"+{home_adv:.2f} Edge (>{req_home:.2f} req)"
-                            else: 
-                                # ⚪️ WHITE TIER (Math Failed - Margin Too Thin)
-                                v3_color = "#ffffff"
-                                if max_adv > 0: 
-                                    req_for_max = req_away if away_adv > home_adv else req_home
-                                    v3_pick, v3_reason = f"⚪️ SKIP ({raw_lean_team} Lean)", f"Margin too thin (+{max_adv:.2f} edge < {req_for_max:.2f} req)"
+                            if away_adv > home_adv and away_adv > 0:
+                                if away_ptc_veto:
+                                    v3_pick, v3_color, v3_reason = f"⚪️ SKIP ({away_team} Veto)", "#ffffff", "Pitch-to-Contact Veto (K% < 19.5 vs 4+ Barrels)"
+                                elif away_adv >= req_away: 
+                                    v3_pick, v3_color, v3_reason = f"🟢 V5.2 PLAY {away_team} ML", "#00ff88", f"+{away_adv:.2f} Edge (>{req_away:.2f} req)"
+                                elif away_adv >= 0.20 and a_kbb >= 15.0 and a_whip < 1.25:
+                                    v3_pick, v3_color, v3_reason = f"🟣 PARLAY ANCHOR ({away_team})", "#b82bf2", f"+{away_adv:.2f} Edge (Safe K-BB% Profile)"
                                 else: 
-                                    v3_pick, v3_reason = "⚪️ SKIP (Dead Even)", "Metrics dead even"
+                                    v3_pick, v3_color, v3_reason = f"⚪️ SKIP ({away_team} Lean)", "#ffffff", f"Margin too thin (+{away_adv:.2f} edge < {req_away:.2f} req)"
+                                    
+                            elif home_adv > away_adv and home_adv > 0:
+                                if home_ptc_veto:
+                                    v3_pick, v3_color, v3_reason = f"⚪️ SKIP ({home_team} Veto)", "#ffffff", "Pitch-to-Contact Veto (K% < 19.5 vs 4+ Barrels)"
+                                elif home_adv >= req_home: 
+                                    v3_pick, v3_color, v3_reason = f"🟢 V5.2 PLAY {home_team} ML", "#00ff88", f"+{home_adv:.2f} Edge (>{req_home:.2f} req)"
+                                elif home_adv >= 0.20 and h_kbb >= 15.0 and h_whip < 1.25:
+                                    v3_pick, v3_color, v3_reason = f"🟣 PARLAY ANCHOR ({home_team})", "#b82bf2", f"+{home_adv:.2f} Edge (Safe K-BB% Profile)"
+                                else: 
+                                    v3_pick, v3_color, v3_reason = f"⚪️ SKIP ({home_team} Lean)", "#ffffff", f"Margin too thin (+{home_adv:.2f} edge < {req_home:.2f} req)"
+                            else:
+                                v3_pick, v3_color, v3_reason = "⚪️ SKIP (Dead Even)", "#ffffff", "Metrics dead even"
 
-                            # RULE 10: DUAL-TIER PRICE FILTER 
+                            # RULE 10: DUAL-TIER PRICE FILTER (Straight Plays Only)
                             if "PLAY" in v3_pick:
                                 target_team = away_team if away_team in v3_pick else home_team
                                 target_odds = away_odds if away_team in v3_pick else home_odds
@@ -764,12 +818,12 @@ def index():
         
     html = f"""<!DOCTYPE html><html>
     <head>
-      <title>MLB V5.1 Dashboard</title>
+      <title>MLB V5.2 Dashboard</title>
       <meta name="viewport" content="width=device-width,initial-scale=1">
       <style>{css}</style>
     </head>
     <body>
-      <h1>⚾ MLB V5.1 Sniper Engine</h1>
+      <h1>⚾ MLB V5.2 Sniper Engine</h1>
       <p class="sub">Last updated: {now_pt.strftime('%I:%M %p PT')} &middot; {now_pt.strftime('%b %d, %Y')}</p>
       {section('🔴 Live Now', '#ff4444', live)}
       {section('✅ Lineups Confirmed', '#00ff88', confirmed)}
@@ -783,7 +837,7 @@ def api_base():
     """Safety net so visiting /api doesn't throw a 404 error."""
     return jsonify({
         "status": "Online",
-        "engine": "V5.1",
+        "engine": "V5.2",
         "endpoints": {
             "dashboard": "/",
             "json_feed": "/api/games",
@@ -802,7 +856,7 @@ def api_ledger():
             LOG_FILE,
             mimetype='text/csv',
             as_attachment=True,
-            download_name='v5_algorithm_ledger.csv'
+            download_name='v5_2_algorithm_ledger.csv'
         )
     else:
         return jsonify({
