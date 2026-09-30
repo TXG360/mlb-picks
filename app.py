@@ -397,6 +397,15 @@ def count_elite_barrels(lineup_sc):
             count += 1
     return count
 
+def count_lineup_drag(lineup_sc):
+    """Counts how many of the top 5 hitters carry an xwOBA below .295"""
+    drag_count = 0
+    for p in lineup_sc[:5]:
+        xwoba = get_stat_value(p.get('statcast', {}).get('xwOBA', '0'))
+        if 0.0 < xwoba < 0.295:
+            drag_count += 1
+    return drag_count
+
 def evaluate_buzzsaw(opp_top_4_xwoba, pitcher_k, pitcher_whip, base_required_delta=0.75): 
     hurdle = base_required_delta
     if opp_top_4_xwoba >= 0.365: hurdle = 1.60
@@ -450,6 +459,8 @@ def get_todays_games():
             away_score = game['teams']['away'].get('score')
             home_score = game['teams']['home'].get('score')
             
+            park_factor = PARK_FACTORS.get(home_team, 100)
+            
             # 🛑 THE CLOSING ODDS MEMORY VAULT 🛑
             live_away_odds = live_odds.get(away_team)
             live_home_odds = live_odds.get(home_team)
@@ -482,6 +493,15 @@ def get_todays_games():
             
             away_p_stats = get_pitcher_stats_mlb(away_p_id, away_p, pitcher_sc)
             home_p_stats = get_pitcher_stats_mlb(home_p_id, home_p, pitcher_sc)
+
+            # Altitude Whiff% Penalty
+            if park_factor >= 110:
+                if away_p_stats and 'Whiff%' in away_p_stats:
+                    a_whiff = get_stat_value(away_p_stats['Whiff%'])
+                    away_p_stats['Whiff%'] = f"{max(0, a_whiff - 5.0):.1f}%"
+                if home_p_stats and 'Whiff%' in home_p_stats:
+                    h_whiff = get_stat_value(home_p_stats['Whiff%'])
+                    home_p_stats['Whiff%'] = f"{max(0, h_whiff - 5.0):.1f}%"
             
             away_lineup, home_lineup, away_lineup_sc, home_lineup_sc = [], [], [], []
             has_missing_data = False
@@ -553,9 +573,9 @@ def get_todays_games():
                             a_elite_barrels = count_elite_barrels(away_lineup_sc)
                             h_elite_barrels = count_elite_barrels(home_lineup_sc)
 
-                            # WHIP Traffic Penalty: Opponent Expected Runs multiplier
-                            eff_a_blended = a_blended_xera * 1.15 if a_whip >= 1.35 else a_blended_xera
-                            eff_h_blended = h_blended_xera * 1.15 if h_whip >= 1.35 else h_blended_xera
+                            # V5.2 WHIP Traffic Penalty: Additive +0.30 Run Tax
+                            eff_a_blended = a_blended_xera + 0.30 if a_whip >= 1.45 else a_blended_xera
+                            eff_h_blended = h_blended_xera + 0.30 if h_whip >= 1.45 else h_blended_xera
 
                             away_adv = eff_h_blended - a_blended_xera
                             home_adv = eff_a_blended - h_blended_xera
@@ -567,16 +587,30 @@ def get_todays_games():
                             req_away = evaluate_buzzsaw(h_top4_xwoba, a_k, a_whip)
                             req_home = evaluate_buzzsaw(a_top4_xwoba, h_k, h_whip)
                             
+                            # V5.2 Coors Field Altitude Hurdle
+                            if park_factor >= 110:
+                                req_away = max(1.25, req_away)
+                                req_home = max(1.25, req_home)
+                            
                             # V5.2 Circuit Breakers
                             away_ptc_veto = (a_k < 19.5 and h_elite_barrels >= 4)
                             home_ptc_veto = (h_k < 19.5 and a_elite_barrels >= 4)
+                            
+                            # V5.2 Late-Season "Rest Volatility" Firewall
+                            a_lineup_drag = count_lineup_drag(away_lineup_sc)
+                            h_lineup_drag = count_lineup_drag(home_lineup_sc)
+
+                            away_rest_veto = (a_lineup_drag >= 2)
+                            home_rest_veto = (h_lineup_drag >= 2)
                             
                             max_adv = max(away_adv, home_adv)
                             raw_lean_team = away_team if away_adv > home_adv else home_team if home_adv > away_adv else "Tie"
 
                             if away_adv > home_adv and away_adv > 0:
                                 if away_ptc_veto:
-                                    v3_pick, v3_color, v3_reason = f"⚪️ SKIP ({away_team} Veto)", "#ffffff", "Pitch-to-Contact Veto (K% < 19.5 vs 4+ Barrels)"
+                                    v3_pick, v3_color, v3_reason = f"⚪️️ SKIP ({away_team} Veto)", "#ffffff", "Pitch-to-Contact Veto (K% < 19.5 vs 4+ Barrels)"
+                                elif away_rest_veto:
+                                    v3_pick, v3_color, v3_reason = f"⚪️ SKIP (Lineup Drag)", "#ffffff", "Late-Season Rest Veto (2+ Top-5 hitters < .295 xwOBA)"
                                 elif away_adv >= req_away: 
                                     v3_pick, v3_color, v3_reason = f"🟢 V5.2 PLAY {away_team} ML", "#00ff88", f"+{away_adv:.2f} Edge (>{req_away:.2f} req)"
                                 elif away_adv >= 0.20 and a_kbb >= 15.0 and a_whip < 1.25:
@@ -587,6 +621,8 @@ def get_todays_games():
                             elif home_adv > away_adv and home_adv > 0:
                                 if home_ptc_veto:
                                     v3_pick, v3_color, v3_reason = f"⚪️ SKIP ({home_team} Veto)", "#ffffff", "Pitch-to-Contact Veto (K% < 19.5 vs 4+ Barrels)"
+                                elif home_rest_veto:
+                                    v3_pick, v3_color, v3_reason = f"⚪️ SKIP (Lineup Drag)", "#ffffff", "Late-Season Rest Veto (2+ Top-5 hitters < .295 xwOBA)"
                                 elif home_adv >= req_home: 
                                     v3_pick, v3_color, v3_reason = f"🟢 V5.2 PLAY {home_team} ML", "#00ff88", f"+{home_adv:.2f} Edge (>{req_home:.2f} req)"
                                 elif home_adv >= 0.20 and h_kbb >= 15.0 and h_whip < 1.25:
@@ -644,7 +680,7 @@ def get_todays_games():
                 'a_top4_xwoba': a_top4_xwoba, 'h_top4_xwoba': h_top4_xwoba,
                 'a_blended_xera': a_blended_xera, 'h_blended_xera': h_blended_xera,
                 'lineup_confirmed': len(away_lineup) > 0 and len(home_lineup) > 0,
-                'weather': get_weather(home_team), 'park_factor': PARK_FACTORS.get(home_team, 100),
+                'weather': get_weather(home_team), 'park_factor': park_factor,
                 'v3_pick': v3_pick, 'v3_color': v3_color, 'v3_reason': v3_reason,
             })
             
